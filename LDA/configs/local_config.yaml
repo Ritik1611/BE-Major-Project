@@ -1,0 +1,97 @@
+# configs/local_config.yaml
+mode: interactive                # one of: interactive | batch | continuous
+
+ingest:
+  video:
+    enabled: true
+    device: 0                   # camera index (integer) or path to file-based ingest
+    fps: 30
+    output_dir: "./processed/video"
+    receipt_dir: "./receipts"
+    params:
+      blur_kernel: 99
+      head_pose_normalize: true
+      openface:
+        enabled: false
+        features: ["AUs","gaze","pose","blink"]
+        binary_path: "/opt/openface/FeatureExtraction"
+
+  audio:
+    enabled: true
+    device: "default"           # device name or index
+    sr: 16000
+    output_dir: "./processed/audio"
+    receipt_dir: "./receipts"
+    params:
+      vad: "webrtc"             # or "none"
+      denoise: true
+      features:
+        prosody: true
+        egemaps: true
+        wav2vec2:
+          model: "facebook/wav2vec2-base"
+          pool: "mean"
+
+  text:
+    enabled: true
+    source: "asr"               # "asr" or "file" or "live"
+    asr_model: "openai/whisper-small" # concrete model id (adjust for your backend)
+    offline: true
+    output_dir: "./processed/text"
+    receipt_dir: "./receipts"
+    params:
+      ner_scrub: ["PERSON","GPE","ORG"]
+      embedder: "sentence-transformers/all-MiniLM-L6-v2"
+      metrics: ["sentiment","ttr","pronoun_ratio"]
+
+  sensors:
+    enabled: false
+
+privacy_policy:
+  export_raw_media: false
+  pii_scrub_text: true
+  persist_windows_seconds: 5
+  retention:
+    raw_buffer_minutes: 2
+    feature_store_days: 90
+  # enforcement policy: behavior when retention exceeded
+  purge_on_startup: false
+
+video_pipe:
+  head_pose_normalize: true
+  openface:
+    enabled: false
+    features: ["AUs","gaze","pose","blink"]
+    binary_path: "/opt/openface/FeatureExtraction"
+
+audio_pipe:
+  vad: "webrtc"
+  denoise: true
+  features:
+    prosody: true
+    egemaps: true
+    wav2vec2: { model: "facebook/wav2vec2-base", pool: "mean" }
+
+text_pipe:
+  ner_scrub: ["PERSON","GPE","ORG"]
+  embedder: "sentence-transformers/all-MiniLM-L6-v2"
+  metrics: ["sentiment","ttr","pronoun_ratio"]
+
+storage:
+  root: "/var/secure_store"     # must be writable by process
+  encrypt: true
+  key_provider: "file"          # options: file | os-keyring | kms
+  key_path: "/var/secure_store/master.key"  # if key_provider == file
+  # if using KMS: key_provider: "kms://arn:aws:kms:..."
+
+outputs:
+  parquet_partitioning: ["modality","date","hour"]
+  emit_manifest: true
+  emit_receipts: true
+
+limits:
+  max_concurrent_sessions: 4
+  max_raw_buffer_mb: 200
+  max_upload_mb: 200
+  log_level: "info"
+  debug: false

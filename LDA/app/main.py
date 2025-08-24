@@ -4,11 +4,11 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 from pathlib import Path
 import yaml, json, time
-from security.secure_store import SecureStore
-from utils.receipts import make_receipt
-from pipelines.video import process_video_file
-from pipelines.audio import process_audio_file
-from pipelines.text import process_text_sources
+from app.security.secure_store import SecureStore
+from app.utils.receipts import make_receipt
+from app.pipelines.video import process_video_file
+from app.pipelines.audio import process_audio_file
+from app.pipelines.text import process_text_sources
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -16,16 +16,19 @@ from datetime import datetime
 
 app = FastAPI(title="Local Data Agent (Privacy)", version="1.0.0")
 
+
 class PreprocessRequest(BaseModel):
     mode: str  # "batch" | "interactive" | "continuous"
     inputs: Dict[str, str]
     config_uri: str
+
 
 def _load_config(uri: str) -> dict:
     assert uri.startswith("file://"), "Only file:// URIs are supported for config"
     p = Path(uri[len("file://"):])
     with open(p, "r") as f:
         return yaml.safe_load(f)
+
 
 def _write_parquet_encrypted(store: SecureStore, session_id: str, modality: str, rows: List[Dict[str, Any]]) -> str:
     if not rows:
@@ -37,6 +40,7 @@ def _write_parquet_encrypted(store: SecureStore, session_id: str, modality: str,
     payload = buf.getvalue().to_pybytes()
     rel = f"{session_id}/{modality}/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.parquet.enc"
     return store.encrypt_write(rel, payload)
+
 
 @app.post("/local/preprocess")
 def preprocess(req: PreprocessRequest):
@@ -50,7 +54,7 @@ def preprocess(req: PreprocessRequest):
     if cfg.get("ingest", {}).get("video", {}).get("enabled", False) and req.inputs.get("video_dir"):
         vdir = Path(req.inputs["video_dir"])
         for p in sorted(vdir.glob("*.mp4")):
-            rows = process_video_file(p, cfg, session_id)
+            rows = process_video_file(str(p), cfg, session_id)
             uri = _write_parquet_encrypted(store, session_id, "video", rows)
             if uri:
                 outputs.append(uri)
@@ -61,7 +65,7 @@ def preprocess(req: PreprocessRequest):
     if cfg.get("ingest", {}).get("audio", {}).get("enabled", False) and req.inputs.get("audio_dir"):
         adir = Path(req.inputs["audio_dir"])
         for p in sorted(adir.glob("*.wav")):
-            rows = process_audio_file(p, cfg, session_id)
+            rows = process_audio_file(str(p), cfg, session_id)
             uri = _write_parquet_encrypted(store, session_id, "audio", rows)
             if uri:
                 outputs.append(uri)

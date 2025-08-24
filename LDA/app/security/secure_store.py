@@ -1,12 +1,11 @@
 # app/security/secure_store.py
-import os
+import base64
+import json
+import secrets
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
-import base64
-import json
-import secrets
 
 class SecureStore:
     def __init__(self, root_dir: str):
