@@ -1,0 +1,812 @@
+# app/pipelines/session_processor.py
+"""
+Session processor for the Local Data Agent (Privacy).
+
+Provides:
+- process_session_file(...) : main entrypoint used by the /session/process route.
+- helper functions (lazy-load heavy libs, ffmpeg wrappers, VAD, diarization, transcription,
+  AV mapping, clip extraction + encryption, feature extraction, QA assembly).
+
+Behavior:
+- Tries to use high-quality libs when available (pyannote, whisper, librosa, mediapipe).
+- Falls back to simpler implementations otherwise (energy-based VAD, single-speaker fallback).
+- All persisted artifacts (clips, integrated parquet, manifests, receipts) should be written
+  using SecureStore.encrypt_write so data at rest is encrypted.
+"""
+
+import json
+import os
+import subprocess
+import tempfile
+import wave
+import contextlib
+import math
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime
+import shutil
+import logging
+
+from app.security.secure_store import SecureStore
+from app.utils.receipts import ReceiptManager
+
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+
+# --------------------------
+# Utilities & lazy imports
+# --------------------------
+def _which(cmd: str) -> Optional[str]:
+    """Return path to executable or None."""
+    from shutil import which
+    return which(cmd)
+
+
+def _ensure_ffmpeg():
+    if not _which("ffmpeg"):
+        raise EnvironmentError("ffmpeg not found on PATH. Install ffmpeg to enable audio/video extraction.")
+
+
+def _safe_import(name: str):
+    """Try importlib to import a module by name. Return module or None."""
+    try:
+        import importlib
+        return importlib.import_module(name)
+    except Exception:
+        return None
+
+
+# Try optional libs (set to None if missing)
+_librosa = _safe_import("librosa")
+_npy = _safe_import("numpy")
+_webrtcvad = _safe_import("webrtcvad")
+# pyannote (diarization), whisper (ASR), resemblyzer etc.
+_pyannote = _safe_import("pyannote.audio")
+_whisper = _safe_import("whisper")  # openai/whisper package (if installed)
+_transformers = _safe_import("transformers")
+_torch = _safe_import("torch")
+
+# Face tracking libs (mediapipe, face_recognition)
+_mediapipe = _safe_import("mediapipe")
+_face_recognition = _safe_import("face_recognition")
+
+
+# --------------------------
+# Audio / Video helpers
+# --------------------------
+
+def _extract_audio_from_video(video_path: str, out_wav_path: str, sr: int = 16000) -> str:
+    """
+    Extract audio from video using ffmpeg and resample to sr (Hz) mono wav.
+    Returns the path to the created wav file.
+    """
+    _ensure_ffmpeg()
+    out_path = Path(out_wav_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-ac", "1", "-ar", str(sr),
+        "-vn", "-hide_banner", "-loglevel", "error",
+        str(out_path)
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg audio extraction failed: {proc.stderr.strip()}")
+    return str(out_path)
+
+
+def _cut_audio_segment(input_wav: str, out_wav: str, start: float, end: float) -> str:
+    """
+    Use ffmpeg to cut an audio segment [start, end) into out_wav.
+    """
+    _ensure_ffmpeg()
+    out_path = Path(out_wav)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(0.0, float(end) - float(start))
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", str(start), "-t", str(duration),
+        "-i", str(input_wav),
+        "-ac", "1", "-ar", "16000",
+        str(out_path)
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg cut audio failed: {proc.stderr.strip()}")
+    return str(out_path)
+
+
+def _cut_video_segment(input_video: str, out_video: str, start: float, end: float) -> str:
+    """
+    Use ffmpeg to cut a video segment [start, end) into out_video.
+    """
+    _ensure_ffmpeg()
+    out_path = Path(out_video)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(0.0, float(end) - float(start))
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", str(start), "-t", str(duration),
+        "-i", str(input_video),
+        "-c", "copy",
+        str(out_path)
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        # try a re-encode fallback (some formats don't allow -c copy with -ss)
+        cmd2 = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", str(start), "-t", str(duration),
+            "-i", str(input_video),
+            "-c:v", "libx264", "-c:a", "aac", "-strict", "-2",
+            str(out_path)
+        ]
+        proc2 = subprocess.run(cmd2, capture_output=True, text=True)
+        if proc2.returncode != 0:
+            raise RuntimeError(f"ffmpeg cut video failed: {proc.stderr.strip()} | {proc2.stderr.strip()}")
+    return str(out_path)
+
+
+def _wav_duration(wav_path: str) -> float:
+    try:
+        with contextlib.closing(wave.open(wav_path, 'rb')) as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            return frames / float(rate)
+    except Exception:
+        # fallback: if librosa available
+        if _librosa:
+            y, sr = _librosa.load(wav_path, sr=None, mono=True)
+            return len(y) / float(sr)
+        return 0.0
+
+
+# --------------------------
+# VAD & diarization
+# --------------------------
+
+def _run_webrtc_vad_segments(wav_path: str, frame_ms: int = 30, aggressiveness: int = 2) -> List[Dict[str, float]]:
+    """
+    Run webrtcvad on a wav file and return a list of voiced segments: [{'start': s, 'end': e}, ...]
+    This function requires webrtcvad package.
+    """
+    if not _webrtcvad:
+        raise RuntimeError("webrtcvad not installed")
+
+    import webrtcvad
+    # read raw frames (16-bit mono)
+    with contextlib.closing(wave.open(wav_path, 'rb')) as wf:
+        rate = wf.getframerate()
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+        frames = wf.readframes(wf.getnframes())
+    vad = webrtcvad.Vad(aggressiveness)
+
+    # frame size and iteration
+    frame_size = int(rate * (frame_ms / 1000.0) * 2)  # bytes
+    voiced_times: List[Tuple[float, float]] = []
+    offset = 0
+    is_speech = False
+    seg_start = None
+    total_bytes = len(frames)
+    while offset + frame_size <= total_bytes:
+        frame = frames[offset:offset + frame_size]
+        timestamp = offset / (rate * 2.0)
+        try:
+            speech = vad.is_speech(frame, rate)
+        except Exception:
+            speech = False
+        if speech and not is_speech:
+            seg_start = timestamp
+            is_speech = True
+        elif not speech and is_speech:
+            seg_end = timestamp
+            if seg_start is not None:
+                voiced_times.append((seg_start, seg_end))
+            is_speech = False
+            seg_start = None
+        offset += frame_size
+
+    # close last segment
+    if is_speech and seg_start is not None:
+        # estimate end
+        voiced_times.append((seg_start, min(timestamp + (frame_ms / 1000.0), _wav_duration(wav_path))))
+
+    segments = [{"start": float(s), "end": float(e)} for (s, e) in voiced_times]
+    return segments
+
+
+def _simple_energy_vad(wav_path: str, window_s: float = 0.5, hop_s: float = 0.25, energy_thresh: float = 0.0005) -> List[Dict[str, float]]:
+    """
+    Simple energy based VAD fallback using librosa if present, or wave+numpy.
+    Returns voiced segments list.
+    """
+    y = None
+    sr = None
+    if _librosa:
+        try:
+            y, sr = _librosa.load(wav_path, sr=None, mono=True)
+        except Exception:
+            y = None
+
+    if y is None:
+        # fallback: read raw wave using wave module and numpy if available
+        try:
+            with wave.open(wav_path, 'rb') as wf:
+                frames = wf.readframes(wf.getnframes())
+                sampwidth = wf.getsampwidth()
+                import struct
+                if sampwidth == 2:
+                    fmt = "<{}h".format(wf.getnframes() * wf.getnchannels())
+                    samples = struct.unpack(fmt, frames)
+                    import numpy as np
+                    y = np.array(samples, dtype=float)
+                    sr = wf.getframerate()
+                else:
+                    # give up
+                    return []
+        except Exception:
+            return []
+
+    import numpy as np  # local import to be safe
+    win = int(round(window_s * sr))
+    hop = int(round(hop_s * sr))
+    energy = []
+    for i in range(0, max(1, len(y) - win + 1), hop):
+        frame = y[i:i + win]
+        energy.append(np.mean(frame.astype(float) ** 2))
+    voiced = []
+    t = 0.0
+    i = 0
+    in_voiced = False
+    start_t = 0.0
+    for e in energy:
+        if e > energy_thresh and not in_voiced:
+            in_voiced = True
+            start_t = i * hop / sr
+        elif e <= energy_thresh and in_voiced:
+            end_t = i * hop / sr
+            voiced.append({"start": float(start_t), "end": float(end_t)})
+            in_voiced = False
+        i += 1
+    if in_voiced:
+        voiced.append({"start": float(start_t), "end": _wav_duration(wav_path)})
+    return voiced
+
+
+def _run_vad(audio_wav: str, cfg: dict) -> List[Dict[str, float]]:
+    """
+    Wrapper that attempts to run a high-quality VAD (webrtcvad), else fallback to energy-based.
+    Returns list of segments with {'start', 'end'}.
+    """
+    try:
+        if _webrtcvad:
+            return _run_webrtc_vad_segments(audio_wav, frame_ms=30, aggressiveness=2)
+    except Exception as e:
+        log.warning("webrtcvad failed: %s", e)
+
+    # fallback energy-based
+    try:
+        return _simple_energy_vad(audio_wav, window_s=0.5, hop_s=0.25, energy_thresh=cfg.get("audio_pipe", {}).get("energy_threshold", 5e-6))
+    except Exception as e:
+        log.warning("energy VAD failed: %s", e)
+        return []
+
+
+# --------------------------
+# Diarization (pyannote fallback)
+# --------------------------
+def _diarize_audio(audio_wav: str, cfg: dict) -> List[Dict[str, Any]]:
+    """
+    Attempt pyannote diarization. If not available or fails, fallback to simple segmentation
+    (each VAD segment is assigned a generic speaker 'spk0' or alternating speakers).
+    Returns list of segments: {'start': float, 'end': float, 'speaker': 'spk0'}
+    """
+    # try pyannote.audio pipeline
+    if _pyannote:
+        try:
+            # This may require internet or previously cached model; wrap in try/except.
+            from pyannote.audio import Pipeline
+            # using pretrained pipeline name could require HF token; try a common alias if available
+            try:
+                pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization", use_auth_token=None)
+            except Exception:
+                # fallback to generic pipeline name if above fails
+                pipeline = Pipeline.from_pretrained("pyannote/embedding", use_auth_token=None)
+            diar = pipeline(audio_wav)
+            segments = []
+            for turn, _, speaker in diar.itertracks(yield_label=True):
+                segments.append({"start": float(turn.start), "end": float(turn.end), "speaker": str(speaker)})
+            if segments:
+                return segments
+        except Exception as e:
+            log.warning("pyannote diarization failed or not available: %s", e)
+
+    # Fallback: use VAD segments and assign speakers in alternating fashion (best-effort)
+    vad_segments = _run_vad(audio_wav, cfg)
+    segments = []
+    speaker_idx = 0
+    for seg in vad_segments:
+        speaker = f"spk{speaker_idx % 2}"
+        segments.append({"start": float(seg["start"]), "end": float(seg["end"]), "speaker": speaker})
+        speaker_idx += 1
+    return segments
+
+
+# --------------------------
+# ASR (whisper fallback)
+# --------------------------
+def _transcribe_segment_whisper(audio_path: str, model_name: str = "small") -> Tuple[str, float]:
+    """
+    Use whisper (if installed) to transcribe a single segment; returns (transcript, confidence_estimate)
+    """
+    if not _whisper:
+        raise RuntimeError("whisper package not installed")
+    try:
+        model = _whisper.load_model(model_name)
+        result = model.transcribe(audio_path)
+        text = result.get("text", "")
+        # whisper doesn't return a single confidence; estimate via average of word probs if available
+        conf = float(result.get("avg_logprob", 0.0)) if "avg_logprob" in result else 0.0
+        return text, float(conf)
+    except Exception as e:
+        log.warning("whisper transcribe failed: %s", e)
+        return "", 0.0
+
+
+def _transcribe_segments(audio_wav: str, segments: List[Dict[str, Any]], cfg: dict) -> Dict[Tuple[float, float], Tuple[str, float]]:
+    """
+    Transcribe each segment (list of {'start','end',...}) and return dict keyed by (start,end).
+    Tries whisper, else returns empty transcripts.
+    """
+    model_name = cfg.get("text_pipe", {}).get("asr_model", "small")
+    transcripts: Dict[Tuple[float, float], Tuple[str, float]] = {}
+    for seg in segments:
+        start = seg["start"]
+        end = seg["end"]
+        # create a temp wav for the segment
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                tmp_path = tf.name
+            _cut_audio_segment(audio_wav, tmp_path, start, end)
+            if _whisper:
+                try:
+                    t, conf = _transcribe_segment_whisper(tmp_path, model_name)
+                except Exception:
+                    t, conf = "", 0.0
+            else:
+                # No ASR installed: leave blank
+                t, conf = "", 0.0
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        transcripts[(start, end)] = (t, conf)
+    return transcripts
+
+
+# --------------------------
+# Face tracking (simple)
+# --------------------------
+def _track_faces_simple(video_path: str, cfg: dict) -> List[Dict[str, Any]]:
+    """
+    Track presence of a single (largest) face across the video using Haar cascade.
+    Returns list of {'id': 'face0', 'start': s, 'end': e}.
+    """
+    tracks: List[Dict[str, Any]] = []
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frame_idx = 0
+        current_face = None
+
+        # Haar cascade path lookup (reuse same logic as video.py)
+        haar_path = None
+        # Prefer config-provided path
+        if cfg.get("video_pipe", {}).get("openface", {}).get("haar_path"):
+            haar_path = cfg["video_pipe"]["openface"]["haar_path"]
+        else:
+            # try relative to openface binary
+            binp = cfg.get("video_pipe", {}).get("openface", {}).get("binary_path")
+            if binp:
+                p = Path(binp).resolve()
+                cand = p.parent / "classifiers" / "haarcascade_frontalface_alt.xml"
+                if cand.exists():
+                    haar_path = str(cand)
+                else:
+                    cand2 = p.parent.parent / "classifiers" / "haarcascade_frontalface_alt.xml"
+                    if cand2.exists():
+                        haar_path = str(cand2)
+        # fallback to OpenCV
+        try:
+            if not haar_path:
+                import cv2 as _cv
+                candidate = _cv.data.haarcascades + "haarcascade_frontalface_default.xml"
+                if Path(candidate).exists():
+                    haar_path = str(candidate)
+        except Exception:
+            pass
+
+        face_cascade = None
+        if haar_path:
+            face_cascade = cv2.CascadeClassifier(haar_path)
+            if face_cascade.empty():
+                face_cascade = None
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_idx += 1
+            ts = frame_idx / (fps or 1.0)
+
+            detections = []
+            try:
+                if face_cascade is not None:
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    dets = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30,30))
+                    for (x, y, w, h) in dets:
+                        detections.append((int(x), int(y), int(w), int(h)))
+            except Exception:
+                detections = []
+
+            if detections:
+                if current_face is None:
+                    current_face = {"id": "face0", "start": ts, "last": ts}
+                else:
+                    current_face["last"] = ts
+
+        cap.release()
+        if current_face is not None:
+            tracks.append({"id": current_face["id"], "start": float(current_face["start"]), "end": float(current_face["last"])})
+        return tracks
+
+    except Exception as e:
+        log.warning("Haar face tracking failed: %s", e)
+        return []
+
+# --------------------------
+# Audio/Video clip extraction + encryption
+# --------------------------
+def _write_clip_and_encrypt_audio(store: SecureStore, audio_wav: str, start: float, end: float,
+                                  session_id: str, work_dir: Path, cfg: dict) -> Optional[str]:
+    """
+    Cut audio clip from audio_wav, encrypt using store, and return file:// URI.
+    """
+    try:
+        clip_rel = f"{session_id}/clips/audio/{int(start*1000)}_{int(end*1000)}.wav"
+        temp_clip = work_dir / "clips" / f"clip_{int(start*1000)}_{int(end*1000)}.wav"
+        temp_clip.parent.mkdir(parents=True, exist_ok=True)
+        _cut_audio_segment(audio_wav, str(temp_clip), start, end)
+        # read bytes and encrypt via store
+        with open(temp_clip, "rb") as f:
+            payload = f.read()
+        uri = store.encrypt_write(clip_rel, payload)
+        # create receipt for the clip
+        receipt_mgr = ReceiptManager(cfg.get("ingest", {}).get("audio", {}).get("receipt_dir", "./receipts"))
+        try:
+            receipt_mgr.create_receipt(
+                operation="audio_clip",
+                input_meta={"session_id": session_id, "start": start, "end": end},
+                output_uri=uri
+            )
+        except Exception:
+            pass
+        try:
+            temp_clip.unlink()
+        except Exception:
+            pass
+        return uri
+    except Exception as e:
+        log.warning("Failed to write/encrypt audio clip: %s", e)
+        return None
+
+
+def _write_clip_and_encrypt_video(store: SecureStore, video_path: str, start: float, end: float,
+                                  session_id: str, work_dir: Path, cfg: dict) -> Optional[str]:
+    """
+    Cut video clip from input and encrypt using store; return file:// URI.
+    """
+    try:
+        clip_rel = f"{session_id}/clips/video/{int(start*1000)}_{int(end*1000)}.mp4"
+        temp_clip = work_dir / "clips" / f"vclip_{int(start*1000)}_{int(end*1000)}.mp4"
+        temp_clip.parent.mkdir(parents=True, exist_ok=True)
+        _cut_video_segment(video_path, str(temp_clip), start, end)
+        with open(temp_clip, "rb") as f:
+            payload = f.read()
+        uri = store.encrypt_write(clip_rel, payload)
+        # receipt
+        receipt_mgr = ReceiptManager(cfg.get("ingest", {}).get("video", {}).get("receipt_dir", "./receipts"))
+        try:
+            receipt_mgr.create_receipt(
+                operation="video_clip",
+                input_meta={"session_id": session_id, "start": start, "end": end},
+                output_uri=uri
+            )
+        except Exception:
+            pass
+        try:
+            temp_clip.unlink()
+        except Exception:
+            pass
+        return uri
+    except Exception as e:
+        log.warning("Failed to cut/encrypt video clip: %s", e)
+        return None
+
+
+# --------------------------
+# Feature extraction (simple audio + placeholders)
+# --------------------------
+def _extract_features_for_segment(audio_wav: Optional[str], video_path: Optional[str],
+                                  start: float, end: float, cfg: dict) -> Dict[str, Any]:
+    """
+    Basic feature extraction for a segment. Returns a dict.
+    - audio: RMS, duration, mean pitch estimate (if librosa available)
+    - video: placeholder; more advanced features should be added (OpenFace, AUs) - handled elsewhere
+    """
+    feats: Dict[str, Any] = {}
+    duration = max(0.0, end - start)
+    feats["duration"] = duration
+    if audio_wav:
+        try:
+            # compute RMS via librosa if present
+            if _librosa:
+                y, sr = _librosa.load(audio_wav, sr=None, mono=True)
+                # crop
+                start_frame = int(start * sr)
+                end_frame = int(end * sr)
+                seg = y[max(0, start_frame):min(len(y), end_frame)]
+                import numpy as np
+                if seg.size > 0:
+                    feats["rms"] = float(_librosa.feature.rms(y=seg).mean())
+                else:
+                    feats["rms"] = 0.0
+                # pitch estimation is more involved; try pyin if available
+                try:
+                    f0, voiced_flag, voiced_probs = _librosa.pyin(seg, fmin=50, fmax=500, sr=sr)
+                    # mean pitch (ignore nans)
+                    import numpy as np
+                    if f0 is not None:
+                        vals = f0[~_npy.isnan(f0)] if _npy is not None else [v for v in f0 if not math.isnan(v)]
+                        feats["pitch_mean"] = float(_npy.mean(vals)) if _npy is not None and len(vals) > 0 else None
+                except Exception:
+                    # no pitch
+                    pass
+        except Exception as e:
+            log.debug("Audio feature extraction failed: %s", e)
+    # video features placeholder
+    feats["video_features_extracted"] = False
+    return feats
+
+
+# --------------------------
+# QA assembly
+# --------------------------
+def _assemble_qa_pairs(rows: List[Dict[str, Any]], cfg: dict) -> List[Dict[str, Any]]:
+    """
+    Given a list of per-turn rows (sorted by start_time), merge consecutive same-speaker segments,
+    and form QA pairs (question->response alternating). Adds derived.pair_id and derived.turn_type.
+    Heuristic detection of question by '?' or starting with wh-words or rising intonation omitted for now.
+    """
+    # merge same-speaker consecutive segments
+    if not rows:
+        return rows
+    merged = []
+    prev = rows[0].copy()
+    for r in rows[1:]:
+        if r.get("speaker_label") == prev.get("speaker_label"):
+            # merge: extend end_time, concatenate transcripts
+            prev["end_time"] = r.get("end_time", prev["end_time"])
+            prev["transcript"] = (prev.get("transcript", "") + " " + r.get("transcript", "")).strip()
+        else:
+            merged.append(prev)
+            prev = r.copy()
+    merged.append(prev)
+
+    # Now form pairs
+    pairs_rows = []
+    pair_idx = 0
+    i = 0
+    while i < len(merged):
+        cur = merged[i]
+        # try to pair with next different-speaker segment
+        if i + 1 < len(merged) and merged[i + 1].get("speaker_label") != cur.get("speaker_label"):
+            pair_id = f"{cur['session_id']}.pair.{pair_idx:04d}"
+            # label heuristics: mark first as question if contains '?' or starts with WH word; else 'utterance'
+            def is_question(text: str) -> bool:
+                if not text:
+                    return False
+                if "?" in text:
+                    return True
+                if text.strip().split(" ")[0].lower() in ("what", "why", "how", "when", "where", "who", "whom", "which"):
+                    return True
+                return False
+            q = merged[i].copy()
+            r_ = merged[i + 1].copy()
+            q.setdefault("derived", {})
+            r_.setdefault("derived", {})
+            q["derived"]["pair_id"] = pair_id
+            r_["derived"]["pair_id"] = pair_id
+            q["derived"]["turn_type"] = "question" if is_question(q.get("transcript","")) else "utterance"
+            r_["derived"]["turn_type"] = "response"
+            pairs_rows.append(q)
+            pairs_rows.append(r_)
+            pair_idx += 1
+            i += 2
+        else:
+            # unpaired turn
+            cur.setdefault("derived", {})
+            cur["derived"]["pair_id"] = None
+            cur["derived"]["turn_type"] = "utterance"
+            pairs_rows.append(cur)
+            i += 1
+
+    return pairs_rows
+
+
+# --------------------------
+# Main pipeline entrypoint
+# --------------------------
+def process_session_file(session_id: str, cfg: dict, work_dir: Path,
+                         video_path: Optional[str], audio_path: Optional[str],
+                         text_input: Optional[str], mode: str,
+                         roles: Optional[Dict[str, str]] = None
+                         ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[str]]:
+    """
+    Process a session according to mode: "session" | "continuous" | "text".
+    Returns (rows, artifacts, receipts).
+
+    rows: list of dicts (schema as discussed earlier)
+    artifacts: dict of artifact labels -> URIs
+    receipts: list of receipt file paths (strings)
+    """
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: Dict[str, Any] = {}
+    receipts: List[str] = []
+    rows: List[Dict[str, Any]] = []
+
+    # create secure store
+    store = SecureStore(cfg["storage"]["root"])
+    # receipt manager - use video receipt dir by default
+    receipt_mgr = ReceiptManager(cfg.get("ingest", {}).get("video", {}).get("receipt_dir", "./receipts"))
+
+    # Ensure audio exists (extract from video if necessary)
+    if video_path and not audio_path:
+        try:
+            audio_path = _extract_audio_from_video(video_path, str(work_dir / "raw_audio.wav"), sr=cfg.get("ingest", {}).get("audio", {}).get("sr", 16000))
+            artifacts["raw_audio"] = audio_path
+        except Exception as e:
+            log.warning("Audio extraction from video failed: %s", e)
+            audio_path = None
+
+    # If mode == text and only text_input provided
+    if mode == "text":
+        # single row storing text with timestamp 0
+        row = {
+            "session_id": session_id,
+            "modality": "text",
+            "segment_id": f"{session_id}.seg.0000",
+            "start_time": 0.0,
+            "end_time": 0.0,
+            "speaker_label": None,
+            "role": roles.get("patient") if roles else "patient",
+            "transcript": text_input or "",
+            "transcript_confidence": None,
+            "audio_uri": None,
+            "video_uri": None,
+            "features": {},
+            "derived": {},
+            "receipt_path": None
+        }
+        rows.append(row)
+        return rows, artifacts, receipts
+
+    # For session / continuous modes:
+    if not audio_path:
+        raise RuntimeError("No audio available for session/continuous processing")
+
+    # 1) VAD -> segments
+    vad_segments = _run_vad(audio_path, cfg)
+    if not vad_segments:
+        # If no VAD segments found, create a single segment covering entire file
+        dur = _wav_duration(audio_path)
+        vad_segments = [{"start": 0.0, "end": dur}]
+
+    # 2) Diarization -> speaker segments
+    diarization = _diarize_audio(audio_path, cfg)
+
+    # 3) Transcription per segment
+    transcripts = _transcribe_segments(audio_path, diarization if diarization else vad_segments, cfg)
+
+    # 4) Face tracking if video available
+    face_tracks = []
+    if video_path:
+        try:
+            face_tracks = _track_faces_simple(video_path, cfg)
+            artifacts["face_tracks"] = face_tracks
+        except Exception as e:
+            log.warning("Face tracking failed: %s", e)
+            face_tracks = []
+
+    # 5) Map speakers to faces (best-effort); simple placeholder: if roles provided, use them
+    speaker_to_role = {}
+    if roles:
+        speaker_to_role = roles.copy()
+    else:
+        # attempt mapping via simple heuristic: spk0 -> patient, spk1 -> counsellor (user may override)
+        unique_speakers = list({seg.get("speaker") for seg in diarization if seg.get("speaker")})
+        unique_speakers_sorted = sorted(unique_speakers)
+        if unique_speakers_sorted:
+            # assign patient to spk1 and counsellor to spk0 by heuristic (user can override)
+            if len(unique_speakers_sorted) >= 2:
+                speaker_to_role[unique_speakers_sorted[0]] = "counsellor"
+                speaker_to_role[unique_speakers_sorted[1]] = "patient"
+            else:
+                speaker_to_role[unique_speakers_sorted[0]] = "patient"
+
+    # 6) Build per-segment rows (use diarization if present else VAD)
+    segments_to_iterate = diarization if diarization else vad_segments
+    seg_counter = 0
+    for seg in segments_to_iterate:
+        seg_counter += 1
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", 0.0))
+        speaker = seg.get("speaker", f"spk0")
+        transcript, conf = transcripts.get((start, end), ("", 0.0))
+        role = speaker_to_role.get(speaker, "unknown")
+
+        # create and encrypt audio/video clips (only if configured to persist clips)
+        audio_uri = None
+        video_uri = None
+        try:
+            if cfg.get("outputs", {}).get("emit_manifest", False) or cfg.get("ingest", {}).get("audio", {}).get("persist_clips", False):
+                audio_uri = _write_clip_and_encrypt_audio(store, audio_path, start, end, session_id, work_dir, cfg)
+        except Exception as e:
+            log.warning("audio clip creation failed: %s", e)
+            audio_uri = None
+
+        try:
+            if video_path:
+                if cfg.get("outputs", {}).get("emit_manifest", False) or cfg.get("ingest", {}).get("video", {}).get("persist_clips", False):
+                    video_uri = _write_clip_and_encrypt_video(store, video_path, start, end, session_id, work_dir, cfg)
+        except Exception as e:
+            log.warning("video clip creation failed: %s", e)
+            video_uri = None
+
+        features = _extract_features_for_segment(audio_path, video_path, start, end, cfg)
+
+        row = {
+            "session_id": session_id,
+            "modality": "combined" if video_path else "audio",
+            "segment_id": f"{session_id}.seg.{seg_counter:04d}",
+            "start_time": start,
+            "end_time": end,
+            "speaker_label": speaker,
+            "role": role,
+            "transcript": transcript,
+            "transcript_confidence": conf,
+            "audio_uri": audio_uri,
+            "video_uri": video_uri,
+            "features": features,
+            "derived": {},
+            "receipt_path": None
+        }
+        rows.append(row)
+
+    # 7) If mode == session, assemble QA pairs
+    if mode == "session":
+        rows = sorted(rows, key=lambda r: r["start_time"])
+        rows = _assemble_qa_pairs(rows, cfg)
+
+    # 8) Optionally create a small manifest artifact (unencrypted list of row metadata is OK to be encrypted by caller)
+    artifacts["rows_count"] = len(rows)
+
+    return rows, artifacts, receipts

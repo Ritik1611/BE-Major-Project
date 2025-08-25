@@ -6,9 +6,13 @@ import base64
 from datetime import datetime
 from pathlib import Path
 import secrets
-from typing import Dict, Any
+from typing import Any, Dict, List
 
 class ReceiptManager:
+    """
+    Simple receipt manager that stores per-operation receipts under a root_dir.
+    Each root_dir will get a 'receipt.key' (HMAC key) to sign receipts.
+    """
     def __init__(self, root_dir: str):
         self.root = Path(root_dir)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -19,62 +23,62 @@ class ReceiptManager:
             self.hmac_key = secrets.token_bytes(32)
             key_path.write_text(base64.b64encode(self.hmac_key).decode())
 
-    def _build_payload(self, operation: str, input_meta: dict, output_uri: str, extra: Dict[str, Any] = None) -> Dict[str, Any]:
+    def create_receipt(self, operation: str, input_meta: Dict[str, Any], output_uri: str) -> str:
         payload = {
             "operation": operation,
             "input_meta": input_meta,
             "output_uri": output_uri,
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
-        if extra:
-            payload["extra"] = extra
-        return payload
-
-    def _sign_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload_bytes = json.dumps(payload, sort_keys=True).encode()
         signature = hmac.new(self.hmac_key, payload_bytes, hashlib.sha256).digest()
-        payload_signed = dict(payload)  # copy
-        payload_signed["signature"] = base64.b64encode(signature).decode()
-        return payload_signed
+        payload["signature"] = base64.b64encode(signature).decode()
 
-    def create_receipt(self, operation: str, input_meta: dict, output_uri: str, extra: Dict[str, Any] = None) -> str:
-        """Generates a signed receipt, stores it on disk, and returns the path."""
-        payload = self._build_payload(operation, input_meta, output_uri, extra)
-        signed = self._sign_payload(payload)
-
-        # Store receipt
         filename = f"{operation}_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}.json"
         path = self.root / filename
-        path.write_text(json.dumps(signed, indent=2))
+        path.write_text(json.dumps(payload, indent=2))
         return str(path)
 
-    def sign_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Sign a payload dict and return the signed dict (does not write to disk)."""
-        return self._sign_payload(payload)
-
     def verify_receipt(self, receipt_path: str) -> bool:
-        """Verifies that a receipt file has a valid signature."""
-        payload = json.loads(Path(receipt_path).read_text())
-        sig = base64.b64decode(payload.pop("signature"))
+        p = Path(receipt_path)
+        payload = json.loads(p.read_text())
+        sig_b64 = payload.pop("signature", None)
+        if sig_b64 is None:
+            return False
+        sig = base64.b64decode(sig_b64)
         payload_bytes = json.dumps(payload, sort_keys=True).encode()
-        expected_sig = hmac.new(self.hmac_key, payload_bytes, hashlib.sha256).digest()
-        return hmac.compare_digest(sig, expected_sig)
+        expected = hmac.new(self.hmac_key, payload_bytes, hashlib.sha256).digest()
+        return hmac.compare_digest(sig, expected)
 
 
-# Convenience top-level function expected by app.main
-_default_receipt_mgr = ReceiptManager("./receipts")
+# ----------------------------
+# Top-level helper (used by app.main)
+# ----------------------------
+_global_key_path = Path.home() / ".local_data_agent_receipt_key"
 
-def make_receipt(agent: str, session_id: str, op: str, params: dict, outputs: list) -> Dict[str, Any]:
+def _load_global_hmac_key() -> bytes:
+    if _global_key_path.exists():
+        return base64.b64decode(_global_key_path.read_text())
+    else:
+        k = secrets.token_bytes(32)
+        _global_key_path.write_text(base64.b64encode(k).decode())
+        return k
+
+def make_receipt(agent: str, session_id: str, op: str, params: Dict[str, Any], outputs: List[str]) -> Dict[str, Any]:
     """
-    Build a standard receipt dict for agent operations. This returns a signed dict
-    (so the caller can encrypt/store it as they wish).
+    Create a session-level receipt payload and sign it with a global HMAC key.
+    Returned object is JSON-serializable.
     """
     payload = {
         "agent": agent,
         "session_id": session_id,
-        "op": op,
+        "operation": op,
         "params": params,
         "outputs": outputs,
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": datetime.utcnow().isoformat() + "Z",
     }
-    return _default_receipt_mgr.sign_payload(payload)
+    payload_bytes = json.dumps(payload, sort_keys=True).encode()
+    key = _load_global_hmac_key()
+    signature = hmac.new(key, payload_bytes, hashlib.sha256).digest()
+    payload["signature"] = base64.b64encode(signature).decode()
+    return payload

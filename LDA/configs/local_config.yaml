@@ -12,9 +12,12 @@ ingest:
       blur_kernel: 99
       head_pose_normalize: true
       openface:
-        enabled: false
+        enabled: true
         features: ["AUs","gaze","pose","blink"]
-        binary_path: "/opt/openface/FeatureExtraction"
+        # Set this to the absolute path of your FeatureExtraction binary
+        binary_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
+        # optional: explicit haar classifier path (if you want)
+        # haar_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
 
   audio:
     enabled: true
@@ -54,15 +57,16 @@ privacy_policy:
   retention:
     raw_buffer_minutes: 2
     feature_store_days: 90
-  # enforcement policy: behavior when retention exceeded
   purge_on_startup: false
 
 video_pipe:
   head_pose_normalize: true
   openface:
-    enabled: false
+    enabled: true
     features: ["AUs","gaze","pose","blink"]
-    binary_path: "/opt/openface/FeatureExtraction"
+    binary_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
+    # optional: classifier path - will be autodetected if omitted
+    # haar_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
 
 audio_pipe:
   vad: "webrtc"
@@ -78,11 +82,10 @@ text_pipe:
   metrics: ["sentiment","ttr","pronoun_ratio"]
 
 storage:
-  root: "/var/secure_store"     # must be writable by process
+  root: "./secure_store"     # changed from /var to local default for easy dev; update to /var/secure_store in prod
   encrypt: true
   key_provider: "file"          # options: file | os-keyring | kms
-  key_path: "/var/secure_store/master.key"  # if key_provider == file
-  # if using KMS: key_provider: "kms://arn:aws:kms:..."
+  key_path: "./secure_store/master.key"  # if key_provider == file
 
 outputs:
   parquet_partitioning: ["modality","date","hour"]

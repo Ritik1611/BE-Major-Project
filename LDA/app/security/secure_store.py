@@ -8,6 +8,11 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 
 class SecureStore:
+    """
+    Simple encrypted file store. Writes files under root_dir.
+    Each invocation derives a key per target directory using HKDF from a master key.
+    Files are stored as JSON with base64-encoded nonce and ciphertext.
+    """
     def __init__(self, root_dir: str):
         self.root = Path(root_dir)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -31,17 +36,19 @@ class SecureStore:
         out_path = self.root / relative_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
         nonce = secrets.token_bytes(12)
-        aesgcm = AESGCM(self._derive_key(str(out_path.parent)))
+        key = self._derive_key(str(out_path.parent))
+        aesgcm = AESGCM(key)
         ciphertext = aesgcm.encrypt(nonce, data, None)
         payload = {"nonce": base64.b64encode(nonce).decode(), "ct": base64.b64encode(ciphertext).decode()}
         out_path.write_text(json.dumps(payload))
         return f"file://{out_path}"
 
     def decrypt_read(self, uri: str) -> bytes:
-        assert uri.startswith("file://"), "Invalid URI scheme"
+        assert uri.startswith("file://"), "Invalid URI scheme for SecureStore"
         p = Path(uri[len("file://"):])
         payload = json.loads(p.read_text())
         nonce = base64.b64decode(payload["nonce"])
         ct = base64.b64decode(payload["ct"])
-        aesgcm = AESGCM(self._derive_key(str(p.parent)))
+        key = self._derive_key(str(p.parent))
+        aesgcm = AESGCM(key)
         return aesgcm.decrypt(nonce, ct, None)

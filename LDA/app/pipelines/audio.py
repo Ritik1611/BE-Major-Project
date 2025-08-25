@@ -1,97 +1,67 @@
 # app/pipelines/audio.py
-import wave
-import contextlib
 from pathlib import Path
 from typing import List, Dict, Any
-import numpy as np
-try:
-    import librosa
-except Exception:
-    librosa = None
-
+import wave
+import contextlib
+import hashlib
 from app.utils.receipts import ReceiptManager
 
-def _read_basic_wave_info(path: str) -> Dict[str, Any]:
-    with contextlib.closing(wave.open(path, 'rb')) as wf:
-        frames = wf.getnframes()
-        rate = wf.getframerate()
-        duration = frames / float(rate)
-        channels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-    return {"duration": duration, "sample_rate": rate, "channels": channels, "sampwidth": sampwidth}
+try:
+    import librosa
+    _HAS_LIBROSA = True
+except Exception:
+    _HAS_LIBROSA = False
 
-def _rms_from_wave(path: str) -> float:
-    with contextlib.closing(wave.open(path, 'rb')) as wf:
-        frames = wf.readframes(wf.getnframes())
-        sampwidth = wf.getsampwidth()
-        dtype = None
-        if sampwidth == 2:
-            dtype = np.int16
-        elif sampwidth == 4:
-            dtype = np.int32
-        elif sampwidth == 1:
-            dtype = np.uint8
-        else:
-            return 0.0
-        arr = np.frombuffer(frames, dtype=dtype).astype(np.float32)
-        if arr.size == 0:
-            return 0.0
-        maxval = float(np.iinfo(dtype).max)
-        arr = arr / maxval
-        return float(np.sqrt(np.mean(arr ** 2)))
-
-def process_audio_file(audio_path: str, cfg: dict, session_id: str) -> List[Dict[str, Any]]:
-    path = Path(audio_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-    rows = []
-    receipt_dir = cfg.get("ingest", {}).get("audio", {}).get("receipt_dir", "./receipts")
-    receipt_mgr = ReceiptManager(receipt_dir)
-
-    info = _read_basic_wave_info(str(path))
-    duration = info["duration"]
-    sample_rate = info["sample_rate"]
-
-    features = {
-        "session_id": session_id,
-        "source": str(path),
-        "filename": path.name,
-        "duration": duration,
-        "sample_rate": sample_rate,
-        "channels": info.get("channels"),
-    }
-
+def _wav_duration(wav_path: str) -> float:
     try:
-        if librosa is not None:
-            y, sr = librosa.load(str(path), sr=None, mono=True)
-            rms = float(np.mean(librosa.feature.rms(y=y).flatten()))
-            spec_cent = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr).flatten()))
-            features.update({"rms": rms, "spectral_centroid_mean": spec_cent})
-            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-            mfcc_means = [float(np.mean(mfcc[i])) for i in range(min(13, mfcc.shape[0]))]
-            for i, v in enumerate(mfcc_means):
-                features[f"mfcc_{i+1}_mean"] = v
-        else:
-            features["rms"] = _rms_from_wave(str(path))
-    except Exception as e:
-        features["feature_error"] = str(e)
-        if "rms" not in features:
-            try:
-                features["rms"] = _rms_from_wave(str(path))
-            except Exception:
-                features["rms"] = 0.0
-
-    # create a receipt for this processing step
-    try:
-        receipt_path = receipt_mgr.create_receipt(
-            operation="audio_preprocessing",
-            input_meta={"source": str(path), "duration": duration, "sample_rate": sample_rate},
-            output_uri=f"local://{session_id}/audio/{path.name}"
-        )
-        features["receipt_path"] = receipt_path
+        with contextlib.closing(wave.open(wav_path, 'rb')) as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            return frames / float(rate)
     except Exception:
-        features["receipt_path"] = None
+        if _HAS_LIBROSA:
+            y, sr = librosa.load(wav_path, sr=None)
+            return len(y) / float(sr)
+        return 0.0
 
-    rows.append(features)
-    return rows
+def process_audio_file(p: Path, cfg: dict, session_id: str) -> List[Dict[str, Any]]:
+    """
+    Simple audio processing adapter. Returns a list of rows (one per file) with metadata and basic features.
+    """
+    p = Path(p)
+    out_rows = []
+    receipt_dir = cfg.get("ingest", {}).get("audio", {}).get("receipt_dir", "./receipts")
+    receipts = ReceiptManager(receipt_dir)
+
+    dur = _wav_duration(str(p))
+    features = {"duration": dur}
+
+    # Try basic librosa features if available
+    if _HAS_LIBROSA:
+        try:
+            y, sr = librosa.load(str(p), sr=cfg.get("ingest", {}).get("audio", {}).get("sr", 16000), mono=True)
+            import numpy as np
+            features["rms_mean"] = float((y ** 2).mean())
+            features["zero_crossing_rate"] = float((librosa.feature.zero_crossing_rate(y).mean()))
+        except Exception:
+            pass
+
+    # Save a trivial processed marker (we don't rewrite the file)
+    processed_uri = str(p)
+
+    receipt_path = receipts.create_receipt(
+        operation="audio_preprocessing",
+        input_meta={"source": str(p), "duration": dur},
+        output_uri=processed_uri
+    )
+
+    out_rows.append({
+        "session_id": session_id,
+        "modality": "audio",
+        "source": str(p),
+        "filename": p.name,
+        "processed_uri": processed_uri,
+        "receipt_path": receipt_path,
+        "features": features
+    })
+    return out_rows

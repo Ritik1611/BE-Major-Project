@@ -2,102 +2,94 @@
 import re
 from pathlib import Path
 import hashlib
+from typing import Tuple
 from app.utils.receipts import ReceiptManager
-from typing import List, Dict, Any
+
+try:
+    import spacy
+    _HAS_SPACY = True
+except Exception:
+    _HAS_SPACY = False
 
 class TextPreprocessor:
     def __init__(self, output_dir: str, receipt_dir: str):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.receipts = ReceiptManager(receipt_dir)
-
-        # Lazy-load spaCy model here so importing this module doesn't require spaCy
         self.nlp = None
-        try:
-            # import inside try so missing spaCy doesn't break imports
-            import spacy  # type: ignore
+        if _HAS_SPACY:
             try:
-                self.nlp = spacy.load("en_core_web_sm")  # For NER-based PII removal
+                # don't fail if model is missing; user can install en_core_web_sm
+                self.nlp = spacy.load("en_core_web_sm")
             except Exception:
-                # model not downloaded; leave nlp None (we'll skip NER)
                 self.nlp = None
-        except Exception:
-            # spaCy (or its dependencies) not installed — we continue without NER
-            self.nlp = None
 
-    def _remove_pii(self, text: str) -> str:
-        """Use NER to remove Personally Identifiable Information (PII) from transcripts."""
-        if self.nlp is None:
-            return text
+    def _remove_pii_spacy(self, text: str) -> str:
         doc = self.nlp(text)
-        anonymized_tokens = []
-
+        tokens = []
         for token in doc:
             if token.ent_type_ in ["PERSON", "ORG", "GPE", "DATE", "TIME", "LOC", "MONEY", "EMAIL", "PHONE"]:
-                anonymized_tokens.append(f"<{token.ent_type_}>")
+                tokens.append(f"<{token.ent_type_}>")
             else:
-                anonymized_tokens.append(token.text)
+                tokens.append(token.text)
+        return " ".join(tokens)
 
-        return " ".join(anonymized_tokens)
+    def _remove_pii_regex(self, text: str) -> str:
+        # remove emails
+        text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "<EMAIL>", text)
+        # remove phone numbers (simple)
+        text = re.sub(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}\b", "<PHONE>", text)
+        # remove urls
+        text = re.sub(r"https?://\S+|www\.\S+", "<URL>", text)
+        return text
 
     def _basic_cleaning(self, text: str) -> str:
-        """Basic text cleaning: remove special chars, extra spaces."""
-        # allow angle brackets (for anonymized tags) and alnum + whitespace
-        text = re.sub(r"[^a-zA-Z0-9\s\<\>]", "", text)
+        text = re.sub(r"[\r\n]+", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
-    def process_text(self, text_input: str, file_id: str) -> tuple[str, str]:
-        """Process text input (from transcript or live session). Returns (out_path, receipt_path)."""
-        cleaned_text = self._basic_cleaning(text_input)
-        anonymized_text = self._remove_pii(cleaned_text)
+    def process_text(self, text_input: str, file_id: str) -> Tuple[str, str]:
+        cleaned = self._basic_cleaning(text_input)
+        if self.nlp:
+            try:
+                anonymized = self._remove_pii_spacy(cleaned)
+            except Exception:
+                anonymized = self._remove_pii_regex(cleaned)
+        else:
+            anonymized = self._remove_pii_regex(cleaned)
 
-        # Save to output
         out_path = self.output_dir / f"processed_{file_id}.txt"
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(anonymized_text)
+        out_path.write_text(anonymized, encoding="utf-8")
 
-        # Generate receipt for audit
         receipt_path = self.receipts.create_receipt(
             operation="text_preprocessing",
             input_meta={
                 "original_length": len(text_input),
-                "anonymized_length": len(anonymized_text),
-                "hash": hashlib.sha256(anonymized_text.encode()).hexdigest()
+                "anonymized_length": len(anonymized),
+                "hash": hashlib.sha256(anonymized.encode()).hexdigest()
             },
             output_uri=str(out_path)
         )
-
         return str(out_path), receipt_path
 
 
-# Adapter expected by app.main: process_text_sources(tdir, cfg, session_id) -> List[Dict]
-def process_text_sources(text_dir: Path | str, cfg: dict, session_id: str) -> List[Dict[str, Any]]:
+# Adapter expected by main: process_text_sources(tdir: Path, cfg: dict, session_id: str) -> List[Dict]
+def process_text_sources(tdir, cfg: dict, session_id: str):
     """
-    Walk a directory of text files and return rows suitable for parquet:
-    each row is a dict with session_id, source, filename, text (anonymized) and receipt_path.
+    Read all text files in tdir and produce a row per file (simple adapter).
     """
-    text_dir = Path(text_dir)
-    out_dir = cfg.get("ingest", {}).get("text", {}).get("output_dir", "./processed/text")
-    receipt_dir = cfg.get("ingest", {}).get("text", {}).get("receipt_dir", "./receipts")
-    tp = TextPreprocessor(out_dir, receipt_dir)
-    rows: List[Dict[str, Any]] = []
-    for p in sorted(text_dir.glob("*.txt")):
-        with open(p, "r", encoding="utf-8") as f:
-            raw = f.read()
-        out_path, receipt_path = tp.process_text(raw, p.stem + f"_{session_id}")
-        # read anonymized content to include in rows (optional)
-        try:
-            with open(out_path, "r", encoding="utf-8") as f:
-                anonymized = f.read()
-        except Exception:
-            anonymized = ""
-        rows.append({
+    from pathlib import Path
+    tdir = Path(tdir)
+    out = []
+    tp = TextPreprocessor(cfg.get("text", {}).get("output_dir", "./processed/text"),
+                          cfg.get("text", {}).get("receipt_dir", "./receipts"))
+    for f in sorted(tdir.glob("*.txt")):
+        p, r = tp.process_text(f.read_text(encoding="utf-8"), f.stem)
+        out.append({
             "session_id": session_id,
-            "source": str(p),
-            "filename": p.name,
-            "anonymized_text": anonymized,
-            "processed_uri": out_path,
-            "receipt_path": receipt_path
+            "modality": "text",
+            "source": str(f),
+            "processed_uri": p,
+            "receipt_path": r
         })
-    return rows
+    return out
