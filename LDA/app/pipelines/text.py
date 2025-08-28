@@ -1,95 +1,90 @@
-# app/pipelines/text.py
 import re
-from pathlib import Path
+import json
 import hashlib
-from typing import Tuple
-from app.utils.receipts import ReceiptManager
+from pathlib import Path
+from typing import Dict, Any, Optional
 
 try:
     import spacy
-    _HAS_SPACY = True
+    nlp = spacy.load("en_core_web_sm")
+    USE_SPACY = True
 except Exception:
-    _HAS_SPACY = False
+    USE_SPACY = False
+
+from app.security.secure_store import SecureStore
+from app.utils.receipts import make_receipt
+
 
 class TextPreprocessor:
-    def __init__(self, output_dir: str, receipt_dir: str):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.receipts = ReceiptManager(receipt_dir)
-        self.nlp = None
-        if _HAS_SPACY:
-            try:
-                # don't fail if model is missing; user can install en_core_web_sm
-                self.nlp = spacy.load("en_core_web_sm")
-            except Exception:
-                self.nlp = None
+    def __init__(self, storage: SecureStore, out_dir: Path):
+        self.storage = storage
+        self.out_dir = out_dir
+        self.out_dir.mkdir(parents=True, exist_ok=True)
 
-    def _remove_pii_spacy(self, text: str) -> str:
-        doc = self.nlp(text)
-        tokens = []
-        for token in doc:
-            if token.ent_type_ in ["PERSON", "ORG", "GPE", "DATE", "TIME", "LOC", "MONEY", "EMAIL", "PHONE"]:
-                tokens.append(f"<{token.ent_type_}>")
-            else:
-                tokens.append(token.text)
-        return " ".join(tokens)
+    def scrub_pii(self, text: str) -> str:
+        """Remove obvious PII using regex, optionally reinforce with spaCy NER."""
+        # basic regex scrubs
+        text = re.sub(r"\b\d{10}\b", "[PHONE]", text)   # phone numbers
+        text = re.sub(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", "[EMAIL]", text)
 
-    def _remove_pii_regex(self, text: str) -> str:
-        # remove emails
-        text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "<EMAIL>", text)
-        # remove phone numbers (simple)
-        text = re.sub(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}\b", "<PHONE>", text)
-        # remove urls
-        text = re.sub(r"https?://\S+|www\.\S+", "<URL>", text)
+        if USE_SPACY:
+            doc = nlp(text)
+            new_tokens = []
+            for ent in doc.ents:
+                if ent.label_ in ["PERSON", "GPE", "ORG"]:
+                    text = text.replace(ent.text, f"[{ent.label_}]")
         return text
 
-    def _basic_cleaning(self, text: str) -> str:
-        text = re.sub(r"[\r\n]+", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+    def process_text(self, text: str, source: str = "user") -> Dict[str, Any]:
+        """Process raw text or ASR transcript and save securely."""
+        clean_text = self.scrub_pii(text)
+        record = {
+            "source": source,
+            "text": clean_text
+        }
 
-    def process_text(self, text_input: str, file_id: str) -> Tuple[str, str]:
-        cleaned = self._basic_cleaning(text_input)
-        if self.nlp:
-            try:
-                anonymized = self._remove_pii_spacy(cleaned)
-            except Exception:
-                anonymized = self._remove_pii_regex(cleaned)
-        else:
-            anonymized = self._remove_pii_regex(cleaned)
+        # filename hash for deterministic storage
+        h = hashlib.sha256(clean_text.encode()).hexdigest()[:16]
+        fpath = self.out_dir / f"{h}.json"
 
-        out_path = self.output_dir / f"processed_{file_id}.txt"
-        out_path.write_text(anonymized, encoding="utf-8")
+        # Save encrypted JSON
+        uri = self.storage.encrypt_write(f"file://{fpath}", json.dumps(record).encode())
 
-        receipt_path = self.receipts.create_receipt(
-            operation="text_preprocessing",
-            input_meta={
-                "original_length": len(text_input),
-                "anonymized_length": len(anonymized),
-                "hash": hashlib.sha256(anonymized.encode()).hexdigest()
-            },
-            output_uri=str(out_path)
-        )
-        return str(out_path), receipt_path
-
-
-# Adapter expected by main: process_text_sources(tdir: Path, cfg: dict, session_id: str) -> List[Dict]
-def process_text_sources(tdir, cfg: dict, session_id: str):
-    """
-    Read all text files in tdir and produce a row per file (simple adapter).
-    """
-    from pathlib import Path
-    tdir = Path(tdir)
-    out = []
-    tp = TextPreprocessor(cfg.get("text", {}).get("output_dir", "./processed/text"),
-                          cfg.get("text", {}).get("receipt_dir", "./receipts"))
-    for f in sorted(tdir.glob("*.txt")):
-        p, r = tp.process_text(f.read_text(encoding="utf-8"), f.stem)
-        out.append({
-            "session_id": session_id,
-            "modality": "text",
-            "source": str(f),
-            "processed_uri": p,
-            "receipt_path": r
+        receipt = make_receipt("text", {
+            "uri": uri,
+            "source": source,
+            "hash": h,
         })
-    return out
+        return receipt
+
+    def process_asr_output(self, asr_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Hook for ASR pipeline.
+        Input: {
+          "text": "transcript string",
+          "confidence": float (optional),
+          "segments": [...] (optional, per-chunk metadata)
+        }
+        """
+        text = asr_result.get("text", "")
+        receipt = self.process_text(text, source="asr")
+        receipt["confidence"] = asr_result.get("confidence")
+        return receipt
+
+
+def process_text_file(
+    text_path: str,
+    storage: SecureStore,
+    out_dir: str,
+    from_asr: Optional[bool] = False
+) -> Dict[str, Any]:
+    """Convenience wrapper to process a raw .txt or ASR JSON file."""
+    tp = TextPreprocessor(storage, Path(out_dir))
+    p = Path(text_path)
+
+    if from_asr:
+        asr_result = json.loads(p.read_text())
+        return tp.process_asr_output(asr_result)
+    else:
+        raw = p.read_text()
+        return tp.process_text(raw, source="file")

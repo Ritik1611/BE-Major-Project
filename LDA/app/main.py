@@ -8,7 +8,7 @@ from app.security.secure_store import SecureStore
 from app.utils.receipts import make_receipt
 from app.pipelines.video import process_video_file
 from app.pipelines.audio import process_audio_file
-from app.pipelines.text import process_text_sources
+from app.pipelines.text import process_text_file
 from app.pipelines.session_processor import process_session_file
 import pandas as pd
 import pyarrow as pa
@@ -37,7 +37,8 @@ def _write_parquet_encrypted(store: SecureStore, session_id: str, modality: str,
     pq.write_table(table, buf)
     payload = buf.getvalue().to_pybytes()
     rel = f"{session_id}/{modality}/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.parquet.enc"
-    return store.encrypt_write(rel, payload)
+    # FIX: Always use file:// prefix
+    return store.encrypt_write(f"file://{store.root / rel}", payload)
 
 @app.post("/local/preprocess")
 def preprocess(req: PreprocessRequest):
@@ -128,7 +129,7 @@ def preprocess(req: PreprocessRequest):
         # TEXT
         if cfg.get("ingest", {}).get("text", {}).get("enabled", False) and req.inputs.get("text_dir"):
             tdir = Path(req.inputs["text_dir"])
-            rows = process_text_sources(tdir, cfg, session_id)
+            rows = process_text_file(tdir, cfg, session_id)
             uri = _write_parquet_encrypted(store, session_id, "text", rows)
             if uri:
                 outputs.append(uri)
@@ -139,7 +140,7 @@ def preprocess(req: PreprocessRequest):
         # Only text ingestion (single-file or directory)
         if req.inputs.get("text_dir"):
             tdir = Path(req.inputs["text_dir"])
-            rows = process_text_sources(tdir, cfg, session_id)
+            rows = process_text_file(tdir, cfg, session_id)
             uri = _write_parquet_encrypted(store, session_id, "text", rows)
             if uri:
                 outputs.append(uri)
@@ -154,7 +155,7 @@ def preprocess(req: PreprocessRequest):
     # Write manifest & receipt (encrypted)
     manifest_bytes = "\n".join(json.dumps(m) for m in manifest).encode()
     mrel = f"{session_id}/manifest/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.jsonl.enc"
-    manifest_uri = store.encrypt_write(mrel, manifest_bytes)
+    manifest_uri = store.encrypt_write(f"file://{store.root / mrel}", manifest_bytes)
 
     receipt = make_receipt(
         agent="local-data-agent",
@@ -164,7 +165,7 @@ def preprocess(req: PreprocessRequest):
         outputs=[manifest_uri] + outputs
     )
     rrel = f"{session_id}/receipts/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.json.enc"
-    receipt_uri = store.encrypt_write(rrel, json.dumps(receipt).encode())
+    receipt_uri = store.encrypt_write(f"file://{store.root / rrel}", json.dumps(receipt).encode())
 
     return {
         "session_id": session_id,

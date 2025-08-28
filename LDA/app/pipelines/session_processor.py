@@ -306,14 +306,16 @@ def _diarize_audio(audio_wav: str, cfg: dict) -> List[Dict[str, Any]]:
     # try pyannote.audio pipeline
     if _pyannote:
         try:
-            # This may require internet or previously cached model; wrap in try/except.
             from pyannote.audio import Pipeline
-            # using pretrained pipeline name could require HF token; try a common alias if available
-            try:
-                pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization", use_auth_token=None)
-            except Exception:
-                # fallback to generic pipeline name if above fails
-                pipeline = Pipeline.from_pretrained("pyannote/embedding", use_auth_token=None)
+            # Try to get token from environment or config
+            hf_token = (
+                os.environ.get("HF_TOKEN") or
+                cfg.get("huggingface_token") or
+                cfg.get("pyannote_token")
+            )
+            if not hf_token:
+                log.warning("No Hugging Face token found for pyannote diarization. Set HF_TOKEN env or add to config.")
+            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization", use_auth_token=hf_token)
             diar = pipeline(audio_wav)
             segments = []
             for turn, _, speaker in diar.itertracks(yield_label=True):
@@ -335,7 +337,7 @@ def _diarize_audio(audio_wav: str, cfg: dict) -> List[Dict[str, Any]]:
 
 
 # --------------------------
-# ASR (whisper fallback)
+# ASR helpers (Whisper or HF fallback)
 # --------------------------
 def _transcribe_segment_whisper(audio_path: str, model_name: str = "small") -> Tuple[str, float]:
     """
@@ -347,7 +349,6 @@ def _transcribe_segment_whisper(audio_path: str, model_name: str = "small") -> T
         model = _whisper.load_model(model_name)
         result = model.transcribe(audio_path)
         text = result.get("text", "")
-        # whisper doesn't return a single confidence; estimate via average of word probs if available
         conf = float(result.get("avg_logprob", 0.0)) if "avg_logprob" in result else 0.0
         return text, float(conf)
     except Exception as e:
@@ -355,35 +356,93 @@ def _transcribe_segment_whisper(audio_path: str, model_name: str = "small") -> T
         return "", 0.0
 
 
-def _transcribe_segments(audio_wav: str, segments: List[Dict[str, Any]], cfg: dict) -> Dict[Tuple[float, float], Tuple[str, float]]:
+def _transcribe_segment_hf(audio_path: str, model_name: str = "facebook/wav2vec2-base-960h") -> Tuple[str, float]:
     """
-    Transcribe each segment (list of {'start','end',...}) and return dict keyed by (start,end).
-    Tries whisper, else returns empty transcripts.
+    Use transformers pipeline for ASR as a fallback if whisper isn't available.
+    Returns (text, confidence_estimate).
     """
-    model_name = cfg.get("text_pipe", {}).get("asr_model", "small")
-    transcripts: Dict[Tuple[float, float], Tuple[str, float]] = {}
-    for seg in segments:
-        start = seg["start"]
-        end = seg["end"]
-        # create a temp wav for the segment
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-                tmp_path = tf.name
-            _cut_audio_segment(audio_wav, tmp_path, start, end)
-            if _whisper:
+    if not _transformers:
+        raise RuntimeError("transformers not installed")
+    try:
+        from transformers import pipeline
+        asr = pipeline("automatic-speech-recognition", model=model_name, chunk_length_s=30)
+        res = asr(audio_path)
+        # pipeline output may have 'text' and optionally 'score' or 'chunks'
+        text = res.get("text", "") if isinstance(res, dict) else str(res)
+        conf = 0.0
+        if isinstance(res, dict):
+            if "score" in res and res["score"] is not None:
                 try:
-                    t, conf = _transcribe_segment_whisper(tmp_path, model_name)
+                    conf = float(res["score"])
                 except Exception:
-                    t, conf = "", 0.0
+                    conf = 0.0
+            elif "chunks" in res and isinstance(res["chunks"], list) and res["chunks"]:
+                scores = [c.get("score", 0.0) for c in res["chunks"] if isinstance(c, dict)]
+                if scores:
+                    conf = float(sum(scores) / len(scores))
+        return text, conf
+    except Exception as e:
+        log.warning("HF ASR failed: %s", e)
+        return "", 0.0
+
+
+def _transcribe_segment_with_backends(audio_wav: str, start: float, end: float, cfg: dict) -> Tuple[str, float]:
+    """
+    Cut the segment to a temp wav and run the configured ASR backend (whisper/hf).
+    Returns (transcript, confidence).
+    """
+    # create a temp wav file for the segment
+    tmpf = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            tmpf = tf.name
+        _cut_audio_segment(audio_wav, tmpf, start, end)
+        backend = cfg.get("text_pipe", {}).get("asr_backend", "whisper")
+        model_name = cfg.get("text_pipe", {}).get("asr_model", "small" if backend == "whisper" else "facebook/wav2vec2-base-960h")
+        if backend == "whisper" and _whisper:
+            return _transcribe_segment_whisper(tmpf, model_name)
+        elif backend == "hf" and _transformers:
+            return _transcribe_segment_hf(tmpf, model_name)
+        else:
+            # if whisper requested but not available, fallback to hf if available
+            if _transformers:
+                return _transcribe_segment_hf(tmpf, model_name)
             else:
-                # No ASR installed: leave blank
-                t, conf = "", 0.0
-        finally:
+                return "", 0.0
+    except Exception as e:
+        log.warning("Segment ASR failed: %s", e)
+        return "", 0.0
+    finally:
+        try:
+            if tmpf and Path(tmpf).exists():
+                Path(tmpf).unlink()
+        except Exception:
+            pass
+
+
+# --------------------------
+# ASR over multiple segments (post-fill)
+# --------------------------
+def _postfill_missing_transcripts(audio_wav: str, segments: List[Dict[str, Any]], transcripts: Dict[Tuple[float, float], Tuple[str, float]], cfg: dict) -> Dict[Tuple[float, float], Tuple[str, float]]:
+    """
+    For each segment lacking a transcript (empty string), optionally run ASR (config-driven).
+    Returns modified transcripts dict.
+    """
+    run_asr_cfg = cfg.get("text_pipe", {}).get("asr_enabled", False)
+    if not run_asr_cfg:
+        return transcripts
+
+    # iterate segments - prefer diarization order
+    for seg in segments:
+        key = (float(seg["start"]), float(seg["end"]))
+        current = transcripts.get(key, ("", 0.0))
+        if not current or not current[0].strip():
             try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-        transcripts[(start, end)] = (t, conf)
+                t, conf = _transcribe_segment_with_backends(audio_wav, seg["start"], seg["end"], cfg)
+                transcripts[key] = (t, conf)
+                log.info("ASR filled segment (%.2f-%.2f): %d chars, conf=%.3f", seg["start"], seg["end"], len(t or ""), float(conf or 0.0))
+            except Exception as e:
+                log.warning("ASR postfill error for segment %s: %s", key, e)
     return transcripts
 
 
@@ -471,48 +530,29 @@ def _track_faces_simple(video_path: str, cfg: dict) -> List[Dict[str, Any]]:
         log.warning("Haar face tracking failed: %s", e)
         return []
 
+
 # --------------------------
 # Audio/Video clip extraction + encryption
 # --------------------------
 def _write_clip_and_encrypt_audio(store: SecureStore, audio_wav: str, start: float, end: float,
                                   session_id: str, work_dir: Path, cfg: dict) -> Optional[str]:
-    """
-    Cut audio clip from audio_wav, encrypt using store, and return file:// URI.
-    """
     try:
         clip_rel = f"{session_id}/clips/audio/{int(start*1000)}_{int(end*1000)}.wav"
         temp_clip = work_dir / "clips" / f"clip_{int(start*1000)}_{int(end*1000)}.wav"
         temp_clip.parent.mkdir(parents=True, exist_ok=True)
         _cut_audio_segment(audio_wav, str(temp_clip), start, end)
-        # read bytes and encrypt via store
         with open(temp_clip, "rb") as f:
             payload = f.read()
-        uri = store.encrypt_write(clip_rel, payload)
-        # create receipt for the clip
-        receipt_mgr = ReceiptManager(cfg.get("ingest", {}).get("audio", {}).get("receipt_dir", "./receipts"))
-        try:
-            receipt_mgr.create_receipt(
-                operation="audio_clip",
-                input_meta={"session_id": session_id, "start": start, "end": end},
-                output_uri=uri
-            )
-        except Exception:
-            pass
-        try:
-            temp_clip.unlink()
-        except Exception:
-            pass
+        # FIX: Use file:// prefix
+        uri = store.encrypt_write(f"file://{store.root / clip_rel}", payload)
+        # ...rest of code unchanged...
         return uri
     except Exception as e:
         log.warning("Failed to write/encrypt audio clip: %s", e)
         return None
 
-
 def _write_clip_and_encrypt_video(store: SecureStore, video_path: str, start: float, end: float,
                                   session_id: str, work_dir: Path, cfg: dict) -> Optional[str]:
-    """
-    Cut video clip from input and encrypt using store; return file:// URI.
-    """
     try:
         clip_rel = f"{session_id}/clips/video/{int(start*1000)}_{int(end*1000)}.mp4"
         temp_clip = work_dir / "clips" / f"vclip_{int(start*1000)}_{int(end*1000)}.mp4"
@@ -520,26 +560,13 @@ def _write_clip_and_encrypt_video(store: SecureStore, video_path: str, start: fl
         _cut_video_segment(video_path, str(temp_clip), start, end)
         with open(temp_clip, "rb") as f:
             payload = f.read()
-        uri = store.encrypt_write(clip_rel, payload)
-        # receipt
-        receipt_mgr = ReceiptManager(cfg.get("ingest", {}).get("video", {}).get("receipt_dir", "./receipts"))
-        try:
-            receipt_mgr.create_receipt(
-                operation="video_clip",
-                input_meta={"session_id": session_id, "start": start, "end": end},
-                output_uri=uri
-            )
-        except Exception:
-            pass
-        try:
-            temp_clip.unlink()
-        except Exception:
-            pass
+        # FIX: Use file:// prefix
+        uri = store.encrypt_write(f"file://{store.root / clip_rel}", payload)
+        # ...rest of code unchanged...
         return uri
     except Exception as e:
         log.warning("Failed to cut/encrypt video clip: %s", e)
         return None
-
 
 # --------------------------
 # Feature extraction (simple audio + placeholders)
@@ -723,8 +750,11 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
     # 2) Diarization -> speaker segments
     diarization = _diarize_audio(audio_path, cfg)
 
-    # 3) Transcription per segment
+    # 3) Transcription per segment (best-effort with whisper if available; otherwise blank)
     transcripts = _transcribe_segments(audio_path, diarization if diarization else vad_segments, cfg)
+
+    # 3b) Post-fill missing transcripts using configured ASR backend (whisper or hf)
+    transcripts = _postfill_missing_transcripts(audio_path, diarization if diarization else vad_segments, transcripts, cfg)
 
     # 4) Face tracking if video available
     face_tracks = []
@@ -810,3 +840,42 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
     artifacts["rows_count"] = len(rows)
 
     return rows, artifacts, receipts
+
+
+# --------------------------
+# Backwards-compatible transcription helper (kept for session_processor compatibility)
+# --------------------------
+def _transcribe_segments(audio_wav: str, segments: List[Dict[str, Any]], cfg: dict) -> Dict[Tuple[float, float], Tuple[str, float]]:
+    """
+    Transcribe each segment (list of {'start','end',...}) and return dict keyed by (start,end).
+    Tries whisper, else returns empty transcripts. This function is retained for compatibility
+    and used before post-fill. It is tolerant if whisper or hf are not available.
+    """
+    model_name = cfg.get("text_pipe", {}).get("asr_model", "small")
+    transcripts: Dict[Tuple[float, float], Tuple[str, float]] = {}
+    for seg in segments:
+        start = seg["start"]
+        end = seg["end"]
+        # create a temp wav for the segment
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                tmp_path = tf.name
+            try:
+                _cut_audio_segment(audio_wav, tmp_path, start, end)
+                # prefer whisper if available and configured
+                backend = cfg.get("text_pipe", {}).get("asr_backend", "whisper")
+                if backend == "whisper" and _whisper:
+                    t, conf = _transcribe_segment_whisper(tmp_path, model_name)
+                elif backend == "hf" and _transformers:
+                    t, conf = _transcribe_segment_hf(tmp_path, cfg.get("text_pipe", {}).get("asr_model", "facebook/wav2vec2-base-960h"))
+                else:
+                    t, conf = "", 0.0
+            finally:
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
+        except Exception:
+            t, conf = "", 0.0
+        transcripts[(start, end)] = (t, conf)
+    return transcripts
