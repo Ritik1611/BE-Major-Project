@@ -51,6 +51,8 @@ def preprocess(req: PreprocessRequest):
     """
     cfg = _load_config(req.config_uri)
     store = SecureStore(cfg["storage"]["root"])
+    openface_bin = cfg["ingest"]["video"]["params"]["openface"]["binary_path"]
+    haar_path = cfg["ingest"]["video"]["params"]["openface"].get("haar_path")
     session_id = f"sess-{int(time.time())}"
     outputs = []
     manifest = []
@@ -108,7 +110,7 @@ def preprocess(req: PreprocessRequest):
         if cfg.get("ingest", {}).get("video", {}).get("enabled", False) and req.inputs.get("video_dir"):
             vdir = Path(req.inputs["video_dir"])
             for p in sorted(vdir.glob("*.mp4")):
-                rows = process_video_file(str(p), cfg, session_id)
+                rows = process_video_file(str(p), cfg, session_id, openface_bin, haar_path)
                 uri = _write_parquet_encrypted(store, session_id, "video", rows)
                 if uri:
                     outputs.append(uri)
