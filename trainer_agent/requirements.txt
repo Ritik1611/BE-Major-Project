@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+torch
+pandas
+pyarrow
+cryptography==45.0.6
