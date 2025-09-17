@@ -1,9 +1,8 @@
-# dp_agent/dp_agent.py
 import os, io, time, torch
-from cryptography.fernet import Fernet
 
-# 👇 centralized receipts
+# 👇 centralized receipts + secure store
 from ..centralised_receipts import CentralReceiptManager
+from ..centralized_secure_store import SecureStore
 
 
 class DPAgent:
@@ -11,9 +10,7 @@ class DPAgent:
                  clip_norm=1.0,
                  noise_multiplier=1.0,
                  secure_store_dir="secure_store/local_updates",
-                 receipts_dir="receipts",
-                 fernet_key=None,
-                 hmac_key=None):
+                 receipts_dir="receipts"):
         self.clip = float(clip_norm)
         self.noise_multiplier = float(noise_multiplier)
         self.secure_store_dir = secure_store_dir
@@ -21,18 +18,8 @@ class DPAgent:
         os.makedirs(self.secure_store_dir, exist_ok=True)
         os.makedirs(self.receipts_dir, exist_ok=True)
 
-        # Load shared Fernet key
-        if fernet_key is None:
-            if os.path.exists("keys/fernet.key"):
-                with open("keys/fernet.key", "rb") as f:
-                    fernet_key = f.read().strip()
-            else:
-                os.makedirs("keys", exist_ok=True)
-                fernet_key = Fernet.generate_key()
-                with open("keys/fernet.key", "wb") as f:
-                    f.write(fernet_key)
-
-        self.fernet = Fernet(fernet_key)
+        # Centralized SecureStore
+        self.store = SecureStore("./secure_store")
 
         # Centralized receipt manager
         self.rm = CentralReceiptManager()
@@ -61,13 +48,6 @@ class DPAgent:
             idx += numel
         return new_sd
 
-    # ---------- encryption placeholders ----------
-    def encrypt_bytes(self, b: bytes) -> bytes:
-        return self.fernet.encrypt(b)
-
-    def decrypt_bytes(self, b: bytes) -> bytes:
-        return self.fernet.decrypt(b)
-
     # ---------- core DP processing ----------
     def process_local_update(self, local_update_uri: str, metadata: dict = None):
         """
@@ -83,9 +63,7 @@ class DPAgent:
             raise FileNotFoundError(f"DPAgent: update not found: {path}")
 
         # 1) read encrypted trainer update and decrypt
-        with open(path, "rb") as f:
-            enc = f.read()
-        decrypted = self.decrypt_bytes(enc)
+        decrypted = self.store.decrypt_read("file://" + path)
 
         # 2) load state_dict from bytes
         buf = io.BytesIO(decrypted)
@@ -113,18 +91,16 @@ class DPAgent:
         # 6) unflatten back to state_dict
         noisy_sd = self.unflatten_state_dict(noisy, meta)
 
-        # 7) serialize & encrypt noisy update
+        # 7) serialize
         out_buf = io.BytesIO()
         torch.save(noisy_sd, out_buf)
         out_bytes = out_buf.getvalue()
-        encrypted_out = self.encrypt_bytes(out_bytes)
 
         # 8) save encrypted DP update
         ts = int(time.time() * 1000)
         out_fname = f"dp_{ts}.pt.enc"
         out_path = os.path.join(self.secure_store_dir, out_fname)
-        with open(out_path, "wb") as wf:
-            wf.write(encrypted_out)
+        self.store.encrypt_write("file://" + out_path, out_bytes)
 
         # 9) build centralized receipt
         receipt = self.rm.create_receipt(

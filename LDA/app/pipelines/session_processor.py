@@ -27,8 +27,8 @@ from datetime import datetime
 import shutil
 import logging
 
-from app.security.secure_store import SecureStore
-from app.utils.receipts import ReceiptManager
+from centralized_secure_store import SecureStore
+from centralised_receipts import ReceiptManager
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

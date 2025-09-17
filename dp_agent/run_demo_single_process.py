@@ -1,10 +1,9 @@
-# dp_agent/run_demo_single_process.py
-import os, io, time, torch, json
-from cryptography.fernet import Fernet
+import os, io, time, torch
 from dp_agent.dp_agent import DPAgent
 
-# 👇 centralized receipts
+# 👇 centralized receipts + secure store
 from ..centralised_receipts import CentralReceiptManager
+from ..centralized_secure_store import SecureStore
 
 
 def make_state_dict():
@@ -12,20 +11,11 @@ def make_state_dict():
 
 
 def diff_privacy():
-    # 🔹 Load or generate Fernet key (shared across pipeline)
-    os.makedirs("keys", exist_ok=True)
-    key_path = "keys/fernet.key"
-    if os.path.exists(key_path):
-        with open(key_path, "rb") as f:
-            demo_key = f.read().strip()
-    else:
-        demo_key = Fernet.generate_key()
-        with open(key_path, "wb") as f:
-            f.write(demo_key)
-        print("Generated new Fernet key -> keys/fernet.key")
-
-    # 🔹 Trainer creates encrypted update
+    # 🔹 Ensure dirs exist
     os.makedirs("secure_store/local_updates", exist_ok=True)
+    os.makedirs("receipts", exist_ok=True)
+
+    # 🔹 Trainer creates an update and stores via SecureStore
     fname = f"trainer_{int(time.time() * 1000)}.pt.enc"
     path = os.path.join("secure_store/local_updates", fname)
 
@@ -34,11 +24,8 @@ def diff_privacy():
     torch.save(sd, buf)
     raw = buf.getvalue()
 
-    f = Fernet(demo_key)
-    enc = f.encrypt(raw)
-
-    with open(path, "wb") as wf:
-        wf.write(enc)
+    store = SecureStore("./secure_store")
+    store.encrypt_write("file://" + path, raw)
 
     # 🔹 Create trainer receipt using CentralReceiptManager
     rm = CentralReceiptManager()
@@ -53,19 +40,16 @@ def diff_privacy():
         },
         outputs=["file://" + path],
     )
-
-    os.makedirs("receipts", exist_ok=True)
     trainer_receipt_uri = rm.write_receipt(trainer_receipt, out_dir="receipts")
 
     print("Trainer receipt created:", trainer_receipt_uri)
 
-    # 🔹 Run DP agent with same Fernet key
+    # 🔹 Run DP agent
     dp = DPAgent(
         clip_norm=1.0,
         noise_multiplier=1.2,
         secure_store_dir="secure_store/local_updates",
         receipts_dir="receipts",
-        fernet_key=demo_key,   # same Fernet key
     )
 
     dp_result = dp.process_local_update(

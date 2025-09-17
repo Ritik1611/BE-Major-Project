@@ -1,3 +1,4 @@
+# centralized_secure_store.py
 import os
 import json
 import base64
@@ -12,20 +13,17 @@ from cryptography.hazmat.backends import default_backend
 
 class SecureStore:
     """
-    AES-GCM encrypted store for files.
+    Centralized AES-GCM encrypted store.
     Keys are derived deterministically from the parent directory path
-    using HKDF so that the same directory can always decrypt its own files.
+    using HKDF, so files in the same directory can always be decrypted.
     """
 
-    def __init__(self, root: Union[str, Path], key_path: Union[str, Path] = None):
+    def __init__(self, root: Union[str, Path] = "./secure_store", key_path: Union[str, Path] = None):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        # Use key_path from config or default to root/master.key
         if key_path is None:
             key_path = self.root / "master.key"
-        else:
-            key_path = Path(key_path)
-        self.key_path = key_path
+        self.key_path = Path(key_path)
         self.master_key = self._load_or_create_master_key()
 
     def _load_or_create_master_key(self) -> bytes:
@@ -34,7 +32,6 @@ class SecureStore:
             try:
                 return base64.b64decode(txt)
             except Exception:
-                # fallback: treat as raw bytes
                 return self.key_path.read_bytes()
         else:
             k = secrets.token_bytes(32)
@@ -51,8 +48,9 @@ class SecureStore:
         )
         return hkdf.derive(self.master_key)
 
+    # ------------------ write ------------------
     def encrypt_write(self, uri: str, data: bytes):
-        assert uri.startswith("file://"), "Invalid URI scheme"
+        assert uri.startswith("file://"), "URI must start with file://"
         p = Path(uri[len("file://"):])
         p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -61,14 +59,13 @@ class SecureStore:
         nonce = os.urandom(12)
         ct = aesgcm.encrypt(nonce, data, None)
 
-        payload = {
-            "nonce": base64.b64encode(nonce).decode(),
-            "ct": base64.b64encode(ct).decode(),
-        }
+        payload = {"nonce": base64.b64encode(nonce).decode(),
+                   "ct": base64.b64encode(ct).decode()}
         p.write_text(json.dumps(payload))
 
+    # ------------------ read ------------------
     def decrypt_read(self, uri: str) -> bytes:
-        assert uri.startswith("file://"), "Invalid URI scheme"
+        assert uri.startswith("file://"), "URI must start with file://"
         p = Path(uri[len("file://"):])
         payload = json.loads(p.read_text())
         nonce = base64.b64decode(payload["nonce"])

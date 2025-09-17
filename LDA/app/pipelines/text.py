@@ -11,8 +11,8 @@ try:
 except Exception:
     USE_SPACY = False
 
-from app.security.secure_store import SecureStore
-from app.utils.receipts import make_receipt
+from centralized_secure_store import SecureStore
+from centralised_receipts import make_receipt
 
 
 class TextPreprocessor:

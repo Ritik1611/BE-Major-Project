@@ -16,7 +16,7 @@ import contextlib
 import logging
 import math
 
-from app.utils.receipts import ReceiptManager
+from centralised_receipts import ReceiptManager
 
 log = logging.getLogger(__name__)
 

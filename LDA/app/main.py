@@ -1,7 +1,7 @@
-# lda/main.py
+# lda/app/main.py
 
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from pathlib import Path
 import yaml, json, time
 import pandas as pd
@@ -9,14 +9,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime
 
-from app.security.secure_store import SecureStore
-from app.pipelines.video import process_video_file
-from app.pipelines.audio import process_audio_file
-from app.pipelines.text import process_text_file
-from app.pipelines.session_processor import process_session_file
+# 👇 centralized imports
+from centralized_secure_store import SecureStore
+from centralised_receipts import CentralReceiptManager
 
-# 👇 centralized receipts
-from ...centralised_receipts import CentralReceiptManager
+# local pipelines
+from LDA.app.pipelines.video import process_video_file
+from LDA.app.pipelines.audio import process_audio_file
+from LDA.app.pipelines.text import process_text_file
+from LDA.app.pipelines.session_processor import process_session_file
 
 
 class PreprocessRequest(BaseModel):
@@ -33,17 +34,37 @@ def _load_config(uri: str) -> dict:
 
 
 def _write_parquet_encrypted(
-    store: SecureStore, session_id: str, modality: str, rows: List[Dict[str, Any]]
-) -> str:
+    store: SecureStore, rm: CentralReceiptManager, session_id: str,
+    modality: str, rows: List[Dict[str, Any]]
+) -> Tuple[str, str]:
+    """
+    Writes rows as encrypted parquet into SecureStore and creates a receipt.
+    Returns: (uri, receipt_uri)
+    """
     if not rows:
-        return ""
+        return "", ""
+
     df = pd.DataFrame(rows)
     table = pa.Table.from_pandas(df)
     buf = pa.BufferOutputStream()
     pq.write_table(table, buf)
     payload = buf.getvalue().to_pybytes()
+
     rel = f"{session_id}/{modality}/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.parquet.enc"
-    return store.encrypt_write(f"file://{store.root / rel}", payload)
+    uri = store.encrypt_write(f"file://{store.root / rel}", payload)
+
+    receipt = rm.create_receipt(
+        agent="local-data-agent",
+        session_id=session_id,
+        operation=f"preprocess_{modality}",
+        params={"rows": len(rows)},
+        outputs=[uri],
+    )
+    rrel = f"{session_id}/receipts/{modality}_{datetime.utcnow().strftime('%Y-%m-%d/%H')}.json.enc"
+    receipt_uri = store.encrypt_write(
+        f"file://{store.root / rrel}", json.dumps(receipt).encode()
+    )
+    return uri, receipt_uri
 
 
 def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
@@ -53,10 +74,12 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
     """
     cfg = _load_config(req.config_uri)
     store = SecureStore(cfg["storage"]["root"])
+    rm = CentralReceiptManager()
+
     openface_bin = cfg["ingest"]["video"]["params"]["openface"]["binary_path"]
     haar_path = cfg["ingest"]["video"]["params"]["openface"].get("haar_path")
     session_id = f"sess-{int(time.time())}"
-    outputs, manifest = [], []
+    outputs, receipts, manifest = [], [], []
 
     mode = req.mode.lower()
 
@@ -67,28 +90,20 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
         if req.inputs.get("video_dir"):
             vdir = Path(req.inputs["video_dir"])
             for p in sorted(vdir.glob("*.mp4")):
-                work_dir = (
-                    Path(cfg.get("storage", {}).get("root", "./secure_store"))
-                    / session_id
-                    / p.stem
-                )
+                work_dir = Path(cfg["storage"]["root"]) / session_id / p.stem
                 work_dir.mkdir(parents=True, exist_ok=True)
 
-                audio_path = req.inputs.get("audio_dir")
-                audio_file = None
-                if audio_path:
-                    candidate = Path(audio_path) / f"{p.stem}.wav"
+                audio_file, text_input = None, None
+                if req.inputs.get("audio_dir"):
+                    candidate = Path(req.inputs["audio_dir"]) / f"{p.stem}.wav"
                     if candidate.exists():
                         audio_file = str(candidate)
-
-                text_input = None
-                text_dir = req.inputs.get("text_dir")
-                if text_dir:
-                    candidate_txt = Path(text_dir) / f"{p.stem}.txt"
+                if req.inputs.get("text_dir"):
+                    candidate_txt = Path(req.inputs["text_dir"]) / f"{p.stem}.txt"
                     if candidate_txt.exists():
                         text_input = candidate_txt.read_text(encoding="utf-8")
 
-                rows, artifacts, receipts = process_session_file(
+                rows, artifacts, rlist = process_session_file(
                     session_id=session_id,
                     cfg=cfg,
                     work_dir=work_dir,
@@ -99,22 +114,14 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
                     roles=None,
                 )
 
-                uri = _write_parquet_encrypted(store, session_id, "session", rows)
+                uri, ruri = _write_parquet_encrypted(store, rm, session_id, "session", rows)
                 if uri:
                     outputs.append(uri)
+                    receipts.append(ruri)
                     for i, _ in enumerate(rows):
-                        manifest.append(
-                            {
-                                "session_id": session_id,
-                                "modality": "session",
-                                "uri": uri,
-                                "row": i,
-                            }
-                        )
+                        manifest.append({"session_id": session_id, "modality": "session", "uri": uri, "row": i})
         else:
-            raise RuntimeError(
-                "mode 'session' or 'continuous' requires 'video_dir' in inputs"
-            )
+            raise RuntimeError("mode 'session' or 'continuous' requires 'video_dir' in inputs")
 
     # -----------------------------
     # BATCH
@@ -125,53 +132,35 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
             vdir = Path(req.inputs["video_dir"])
             for p in sorted(vdir.glob("*.mp4")):
                 rows = process_video_file(str(p), cfg, session_id, openface_bin, haar_path)
-                uri = _write_parquet_encrypted(store, session_id, "video", rows)
+                uri, ruri = _write_parquet_encrypted(store, rm, session_id, "video", rows)
                 if uri:
                     outputs.append(uri)
+                    receipts.append(ruri)
                     for i, _ in enumerate(rows):
-                        manifest.append(
-                            {
-                                "session_id": session_id,
-                                "modality": "video",
-                                "uri": uri,
-                                "row": i,
-                            }
-                        )
+                        manifest.append({"session_id": session_id, "modality": "video", "uri": uri, "row": i})
 
         # AUDIO
         if cfg.get("ingest", {}).get("audio", {}).get("enabled", False) and req.inputs.get("audio_dir"):
             adir = Path(req.inputs["audio_dir"])
             for p in sorted(adir.glob("*.wav")):
                 rows = process_audio_file(p, cfg, session_id)
-                uri = _write_parquet_encrypted(store, session_id, "audio", rows)
+                uri, ruri = _write_parquet_encrypted(store, rm, session_id, "audio", rows)
                 if uri:
                     outputs.append(uri)
+                    receipts.append(ruri)
                     for i, _ in enumerate(rows):
-                        manifest.append(
-                            {
-                                "session_id": session_id,
-                                "modality": "audio",
-                                "uri": uri,
-                                "row": i,
-                            }
-                        )
+                        manifest.append({"session_id": session_id, "modality": "audio", "uri": uri, "row": i})
 
         # TEXT
         if cfg.get("ingest", {}).get("text", {}).get("enabled", False) and req.inputs.get("text_dir"):
             tdir = Path(req.inputs["text_dir"])
             rows = process_text_file(tdir, cfg, session_id)
-            uri = _write_parquet_encrypted(store, session_id, "text", rows)
+            uri, ruri = _write_parquet_encrypted(store, rm, session_id, "text", rows)
             if uri:
                 outputs.append(uri)
+                receipts.append(ruri)
                 for i, _ in enumerate(rows):
-                    manifest.append(
-                        {
-                            "session_id": session_id,
-                            "modality": "text",
-                            "uri": uri,
-                            "row": i,
-                        }
-                    )
+                    manifest.append({"session_id": session_id, "modality": "text", "uri": uri, "row": i})
 
     # -----------------------------
     # TEXT ONLY
@@ -180,18 +169,12 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
         if req.inputs.get("text_dir"):
             tdir = Path(req.inputs["text_dir"])
             rows = process_text_file(tdir, cfg, session_id)
-            uri = _write_parquet_encrypted(store, session_id, "text", rows)
+            uri, ruri = _write_parquet_encrypted(store, rm, session_id, "text", rows)
             if uri:
                 outputs.append(uri)
+                receipts.append(ruri)
                 for i, _ in enumerate(rows):
-                    manifest.append(
-                        {
-                            "session_id": session_id,
-                            "modality": "text",
-                            "uri": uri,
-                            "row": i,
-                        }
-                    )
+                    manifest.append({"session_id": session_id, "modality": "text", "uri": uri, "row": i})
         else:
             raise RuntimeError("mode 'text' requires 'text_dir' in inputs")
 
@@ -199,28 +182,27 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
         raise RuntimeError(f"Unknown mode '{req.mode}'")
 
     # -----------------------------
-    # MANIFEST + RECEIPT
+    # MANIFEST + FINAL RECEIPT
     # -----------------------------
     manifest_bytes = "\n".join(json.dumps(m) for m in manifest).encode()
     mrel = f"{session_id}/manifest/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.jsonl.enc"
     manifest_uri = store.encrypt_write(f"file://{store.root / mrel}", manifest_bytes)
 
-    rm = CentralReceiptManager()
-    receipt = rm.create_receipt(
+    final_receipt = rm.create_receipt(
         agent="local-data-agent",
         session_id=session_id,
-        operation="preprocess",
+        operation="preprocess_complete",
         params={"mode": req.mode, "config_uri": req.config_uri},
         outputs=[manifest_uri] + outputs,
     )
-    rrel = f"{session_id}/receipts/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.json.enc"
-    receipt_uri = store.encrypt_write(
-        f"file://{store.root / rrel}", json.dumps(receipt).encode()
+    rrel = f"{session_id}/receipts/final_{datetime.utcnow().strftime('%Y-%m-%d/%H')}.json.enc"
+    final_receipt_uri = store.encrypt_write(
+        f"file://{store.root / rrel}", json.dumps(final_receipt).encode()
     )
 
     return {
         "session_id": session_id,
         "artifact_manifest": manifest_uri,
-        "receipts": [receipt_uri],
+        "receipts": receipts + [final_receipt_uri],
         "count": len(manifest),
     }
