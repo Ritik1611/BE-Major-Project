@@ -1,3 +1,4 @@
+# dp_agent/dp_agent.py
 import os, io, time, torch
 
 # 👇 centralized receipts + secure store
@@ -6,13 +7,17 @@ from centralized_secure_store import SecureStore
 
 
 class DPAgent:
+    SUPPORTED_MECHANISMS = {"gaussian", "laplace", "uniform", "exponential", "none"}
+
     def __init__(self,
                  clip_norm=1.0,
                  noise_multiplier=1.0,
+                 mechanism="gaussian",   # 🔹 support many noise types
                  secure_store_dir="secure_store/local_updates",
                  receipts_dir="receipts"):
         self.clip = float(clip_norm)
         self.noise_multiplier = float(noise_multiplier)
+        self.mechanism = mechanism.lower()
         self.secure_store_dir = secure_store_dir
         self.receipts_dir = receipts_dir
         os.makedirs(self.secure_store_dir, exist_ok=True)
@@ -23,6 +28,12 @@ class DPAgent:
 
         # Centralized receipt manager
         self.rm = CentralReceiptManager()
+
+        if self.mechanism not in self.SUPPORTED_MECHANISMS:
+            raise ValueError(
+                f"Unsupported mechanism '{self.mechanism}'. "
+                f"Supported: {self.SUPPORTED_MECHANISMS}"
+            )
 
     # ---------- flatten / unflatten helpers ----------
     def flatten_state_dict(self, sd):
@@ -47,6 +58,47 @@ class DPAgent:
             new_sd[k] = seg
             idx += numel
         return new_sd
+
+    # ---------- noise helper ----------
+    def add_noise(self, flat: torch.Tensor) -> torch.Tensor:
+        """
+        Apply DP noise to a flattened tensor using the chosen mechanism.
+        """
+        if flat.numel() == 0:
+            return flat
+
+        if self.mechanism == "none":
+            return flat  # no noise applied
+
+        elif self.mechanism == "gaussian":
+            std = self.noise_multiplier * self.clip
+            noise = torch.normal(0.0, std, size=flat.shape)
+
+        elif self.mechanism == "laplace":
+            scale = self.noise_multiplier * self.clip
+            if scale == 0.0:
+                return flat  # no noise if scale is 0
+            dist = torch.distributions.Laplace(0.0, scale)
+            noise = dist.sample(flat.shape)
+
+        elif self.mechanism == "uniform":
+            # Uniform noise in [-a, a] where a = noise_multiplier * clip
+            a = self.noise_multiplier * self.clip
+            noise = (2 * a) * torch.rand(flat.shape) - a
+
+        elif self.mechanism == "exponential":
+            # Signed exponential: symmetric around 0
+            scale = self.noise_multiplier * self.clip
+            dist = torch.distributions.Exponential(1.0 / (scale + 1e-8))
+            samples = dist.sample(flat.shape)
+            # Randomly flip sign
+            signs = torch.randint(0, 2, flat.shape) * 2 - 1
+            noise = samples * signs
+
+        else:
+            raise ValueError(f"Unsupported mechanism: {self.mechanism}")
+
+        return flat + noise
 
     # ---------- core DP processing ----------
     def process_local_update(self, local_update_uri: str, metadata: dict = None):
@@ -79,13 +131,8 @@ class DPAgent:
             flat = flat * (self.clip / l2_before)
             clipped = True
 
-        # 5) add Gaussian noise
-        noise_std = self.noise_multiplier * self.clip
-        noisy = flat
-        if flat.numel() > 0:
-            noise = torch.normal(mean=0.0, std=noise_std, size=flat.shape)
-            noisy = flat + noise
-
+        # 5) add noise (based on mechanism)
+        noisy = self.add_noise(flat)
         l2_after = float(torch.norm(noisy, p=2).item()) if noisy.numel() > 0 else 0.0
 
         # 6) unflatten back to state_dict
@@ -98,7 +145,7 @@ class DPAgent:
 
         # 8) save encrypted DP update
         ts = int(time.time() * 1000)
-        out_fname = f"dp_{ts}.pt.enc"
+        out_fname = f"dp_{self.mechanism}_{ts}.pt.enc"
         out_path = os.path.join(self.secure_store_dir, out_fname)
         self.store.encrypt_write("file://" + out_path, out_bytes)
 
@@ -111,6 +158,7 @@ class DPAgent:
                 "clip_norm": self.clip,
                 "clip_applied": clipped,
                 "noise_multiplier": self.noise_multiplier,
+                "mechanism": self.mechanism,
                 "l2_norm_before": l2_before,
                 "l2_norm_after": l2_after,
             },

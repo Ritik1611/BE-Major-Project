@@ -103,8 +103,8 @@ def decrypt_with_candidates(ct: bytes, nonce: bytes,
 
 
 def main():
-    encrypted_file = "/home/ritik26/Desktop/BE-Major-Project/LDA/secure_store/sess-1757762287/session/2025-09-13/11.parquet.enc"
-    master_key_file = "/home/ritik26/Desktop/BE-Major-Project/LDA/secure_store/master.key"
+    encrypted_file = "/home/ritik26/Desktop/BE-Major-Project/secure_store/sess-1758179451/session/2025-09-18/07.parquet.enc"
+    master_key_file = "/home/ritik26/Desktop/BE-Major-Project/secure_store/master.key"
 
     p = Path(encrypted_file)
     payload = json.loads(p.read_text())

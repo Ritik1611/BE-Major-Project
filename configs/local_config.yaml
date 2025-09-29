@@ -14,9 +14,9 @@ ingest:
         enabled: true
         features: ["AUs","gaze","pose","blink"]
         # Set this to the absolute path of your FeatureExtraction binary
-        binary_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
+        binary_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
         # optional: explicit haar classifier path (if you want)
-        haar_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
+        haar_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
     persist_clips: true
 
   audio:
@@ -67,9 +67,9 @@ video_pipe:
   openface:
     enabled: true
     features: ["AUs","gaze","pose","blink"]
-    binary_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
+    binary_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
     # optional: classifier path - will be autodetected if omitted
-    # haar_path: "/home/ritik/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
+    haar_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
 
 audio_pipe:
   vad: "webrtc"

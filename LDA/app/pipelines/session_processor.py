@@ -607,8 +607,42 @@ def _extract_features_for_segment(audio_wav: Optional[str], video_path: Optional
                     pass
         except Exception as e:
             log.debug("Audio feature extraction failed: %s", e)
-    # video features placeholder
+    # --- NEW: Video features via OpenFace ---
     feats["video_features_extracted"] = False
+    if video_path and cfg.get("video_pipe", {}).get("openface", {}).get("enabled", False):
+        openface_bin = cfg["video_pipe"]["openface"]["binary_path"]
+        haar_path = cfg["video_pipe"]["openface"].get("haar_path")
+        # Cut segment to temp file
+        temp_clip = Path(tempfile.gettempdir()) / f"vclip_{int(start*1000)}_{int(end*1000)}.mp4"
+        try:
+            _cut_video_segment(video_path, str(temp_clip), start, end)
+            # Run OpenFace
+            out_dir = Path(tempfile.gettempdir()) / f"openface_out_{int(start*1000)}_{int(end*1000)}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                openface_bin,
+                "-f", str(temp_clip),
+                "-out_dir", str(out_dir)
+            ]
+            if haar_path:
+                cmd += ["-face_detector", "haar", "-haar_cascade", haar_path]
+            subprocess.run(cmd, check=True)
+            # Parse OpenFace CSV
+            csv_files = list(out_dir.glob("*.csv"))
+            if csv_files:
+                import pandas as pd
+                df = pd.read_csv(csv_files[0])
+                # Extract AUs, gaze, pose, blink, etc.
+                for col in df.columns:
+                    if col.startswith("AU") or col in ["gaze_angle_x", "gaze_angle_y", "pose_Tx", "pose_Ty", "pose_Tz"]:
+                        feats[col] = df[col].mean()
+                feats["video_features_extracted"] = True
+            # Cleanup temp files
+            temp_clip.unlink(missing_ok=True)
+            shutil.rmtree(out_dir, ignore_errors=True)
+        except Exception as e:
+            log.warning("OpenFace feature extraction failed: %s", e)
+            feats["video_features_extracted"] = False
     return feats
 
 

@@ -39,20 +39,37 @@ def _write_parquet_encrypted(
 ) -> Tuple[str, str]:
     """
     Writes rows as encrypted parquet into SecureStore and creates a receipt.
+    Ensures dict/list fields (e.g., features, derived) are JSON-serialized.
     Returns: (uri, receipt_uri)
     """
     if not rows:
         return "", ""
 
-    df = pd.DataFrame(rows)
+    # --- normalize rows ---
+    norm_rows = []
+    for r in rows:
+        r = dict(r)  # shallow copy
+        for k in ("features", "derived"):
+            if isinstance(r.get(k), (dict, list)):
+                try:
+                    r[k] = json.dumps(r[k])
+                except Exception:
+                    # fallback: repr to avoid crashes
+                    r[k] = repr(r[k])
+        norm_rows.append(r)
+
+    # --- DataFrame -> Parquet ---
+    df = pd.DataFrame(norm_rows)
     table = pa.Table.from_pandas(df)
     buf = pa.BufferOutputStream()
     pq.write_table(table, buf)
     payload = buf.getvalue().to_pybytes()
 
+    # --- write encrypted parquet ---
     rel = f"{session_id}/{modality}/{datetime.utcnow().strftime('%Y-%m-%d/%H')}.parquet.enc"
     uri = store.encrypt_write(f"file://{store.root / rel}", payload)
 
+    # --- create receipt ---
     receipt = rm.create_receipt(
         agent="local-data-agent",
         session_id=session_id,
@@ -64,8 +81,8 @@ def _write_parquet_encrypted(
     receipt_uri = store.encrypt_write(
         f"file://{store.root / rrel}", json.dumps(receipt).encode()
     )
-    return uri, receipt_uri
 
+    return uri, receipt_uri
 
 def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
     """
