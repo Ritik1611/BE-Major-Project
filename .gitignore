@@ -1,2 +1,9 @@
 dementia/*
 LDA/app/pipelines/.env
+data/*
+labels/*
+plots/*
+opensmile/*
+secure_store/*
+receipts/*
+results/*

@@ -12,25 +12,26 @@ ingest:
       head_pose_normalize: true
       openface:
         enabled: true
-        features: ["AUs","gaze","pose","blink"]
-        # Set this to the absolute path of your FeatureExtraction binary
+        features: ["AUs", "gaze", "pose", "blink"]
         binary_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
-        # optional: explicit haar classifier path (if you want)
         haar_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
     persist_clips: true
 
   audio:
     enabled: true
-    device: "default"           # device name or index
+    device: "default"           # system microphone or input index
     sr: 16000
     output_dir: "./processed/audio"
     receipt_dir: "./receipts"
     params:
-      vad: "webrtc"             # or "none"
+      vad: "webrtc"             # Voice activity detection
       denoise: true
       features:
         prosody: true
-        egemaps: true
+        egemaps:
+          enabled: true
+          opensmile_binary: "/home/ritik26/Desktop/BE-Major-Project/opensmile/build/SMILExtract"
+          opensmile_config: "/home/ritik26/Desktop/BE-Major-Project/opensmile/config/egemaps/v02/eGeMAPSv02.conf"
         wav2vec2:
           enabled: true
           model: "facebook/wav2vec2-base-960h"
@@ -40,15 +41,15 @@ ingest:
 
   text:
     enabled: true
-    source: "asr"               # "asr" or "file" or "live"
-    asr_model: "openai/whisper-small" # concrete model id (adjust for your backend)
+    source: "asr"               # "asr" | "file" | "live"
+    asr_model: "openai/whisper-small"
     offline: true
     output_dir: "./processed/text"
     receipt_dir: "./receipts"
     params:
-      ner_scrub: ["PERSON","GPE","ORG"]
+      ner_scrub: ["PERSON", "GPE", "ORG"]
       embedder: "sentence-transformers/all-MiniLM-L6-v2"
-      metrics: ["sentiment","ttr","pronoun_ratio"]
+      metrics: ["sentiment", "ttr", "pronoun_ratio"]
 
   sensors:
     enabled: false
@@ -66,9 +67,8 @@ video_pipe:
   head_pose_normalize: true
   openface:
     enabled: true
-    features: ["AUs","gaze","pose","blink"]
+    features: ["AUs", "gaze", "pose", "blink"]
     binary_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
-    # optional: classifier path - will be autodetected if omitted
     haar_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
 
 audio_pipe:
@@ -76,24 +76,28 @@ audio_pipe:
   denoise: true
   features:
     prosody: true
-    egemaps: true
+    egemaps:
+      enabled: true
+      opensmile_binary: "/home/ritik26/Desktop/BE-Major-Project/opensmile/build/SMILExtract"
+      opensmile_config: "/home/ritik26/Desktop/BE-Major-Project/opensmile/config/egemaps/v02/eGeMAPSv02.conf"
     wav2vec2:
-      model: "facebook/wav2vec2-base"
+      enabled: true
+      model: "facebook/wav2vec2-base-960h"
       pool: "mean"
 
 text_pipe:
-  ner_scrub: ["PERSON","GPE","ORG"]
+  ner_scrub: ["PERSON", "GPE", "ORG"]
   embedder: "sentence-transformers/all-MiniLM-L6-v2"
-  metrics: ["sentiment","ttr","pronoun_ratio"]
+  metrics: ["sentiment", "ttr", "pronoun_ratio"]
 
 storage:
-  root: "./secure_store"     # changed from /var to local default for easy dev; update to /var/secure_store in prod
+  root: "./secure_store"          # dev default; change to /var/secure_store in prod
   encrypt: true
-  key_provider: "file"          # options: file | os-keyring | kms
-  key_path: "./secure_store/master.key"  # if key_provider == file
+  key_provider: "file"
+  key_path: "./secure_store/master.key"
 
 outputs:
-  parquet_partitioning: ["modality","date","hour"]
+  parquet_partitioning: ["modality", "date", "hour"]
   emit_manifest: true
   emit_receipts: true
 

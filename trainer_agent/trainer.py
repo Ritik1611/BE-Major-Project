@@ -1,74 +1,162 @@
+# trainer_agent/trainer.py
 import torch
-import torch.optim as optim
 import torch.nn as nn
-from trainer_agent.model import DummyModel
-from typing import Tuple, Dict, Any
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+import numpy as np
+import math
+from typing import Tuple, Optional
 
-def compute_weight_delta(before: Dict[str, torch.Tensor], after: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    delta = {}
-    for k in before.keys():
-        # keep deltas on CPU
-        delta[k] = (after[k].cpu() - before[k].cpu())
-    return delta
+
+class SimpleMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dims=(256, 128), output_dim=2):
+        super().__init__()
+        layers = []
+        prev = input_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(prev, h))
+            layers.append(nn.ReLU())
+            prev = h
+        layers.append(nn.Linear(prev, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class AutoEncoder(nn.Module):
+    def __init__(self, input_dim, bottleneck=64, hidden=(256, 128)):
+        super().__init__()
+        enc_layers = []
+        prev = input_dim
+        for h in hidden:
+            enc_layers.append(nn.Linear(prev, h))
+            enc_layers.append(nn.ReLU())
+            prev = h
+        enc_layers.append(nn.Linear(prev, bottleneck))
+        self.encoder = nn.Sequential(*enc_layers)
+
+        dec_layers = []
+        prev = bottleneck
+        for h in reversed(hidden):
+            dec_layers.append(nn.Linear(prev, h))
+            dec_layers.append(nn.ReLU())
+            prev = h
+        dec_layers.append(nn.Linear(prev, input_dim))
+        self.decoder = nn.Sequential(*dec_layers)
+
+    def forward(self, x):
+        z = self.encoder(x)
+        recon = self.decoder(z)
+        return recon
+
+    def embed(self, x):
+        return self.encoder(x)
+
+
+def _to_device(tensor_or_model, device):
+    if isinstance(tensor_or_model, torch.nn.Module):
+        return tensor_or_model.to(device)
+    return tensor_or_model.to(device)
 
 
 def train_model(
     X: torch.Tensor,
     y: torch.Tensor,
     input_dim: int,
-    epochs: int = 1,
+    epochs: int = 5,
     batch_size: int = 32,
     lr: float = 1e-3,
     device: str = "cpu",
-    seed: int = 42
-) -> Tuple[Dict[str, torch.Tensor], nn.Module]:
+    model_type: str = "mlp",
+    rag_k: int = 3,
+    augment_with_neighbors: bool = False,
+    X_reference: Optional[torch.Tensor] = None
+) -> Tuple[dict, Optional[torch.nn.Module]]:
     """
-    Train a simple DummyModel and return (delta_state_dict, trained_model).
-
-    - The returned model is moved to CPU and set to eval() for safe reuse later.
-    - The delta is a state-dict-like mapping of CPU tensors (after - before).
-    - model._init_params is attached so external code can re-instantiate if needed.
+    Trains either supervised model (if y has >=2 classes) or autoencoder (unsupervised)
+    Returns: (delta_state_dict, model_instance)
+    delta_state_dict is a mapping of tensors (trained_state - initial_state)
+    model_instance is the trained PyTorch model (can be None in edge cases)
     """
-    # reproducibility
-    torch.manual_seed(seed)
 
-    # instantiate model on device
-    model = DummyModel(input_dim=input_dim).to(device)
+    device = torch.device(device)
+    X = X.to(device)
 
-    # save initial state (on CPU)
-    before = {k: v.clone().detach().cpu() for k, v in model.state_dict().items()}
-
-    dataset = torch.utils.data.TensorDataset(X.to(device), y.to(device))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    opt = optim.Adam(model.parameters(), lr=lr)
-
-    model.train()
-    for _ in range(epochs):
-        for xb, yb in loader:
-            opt.zero_grad()
-            out = model(xb)
-            # dummy loss (MSE towards zero vector)
-            loss = (out ** 2).mean()
-            loss.backward()
-            opt.step()
-
-    # save final state (on CPU)
-    after = {k: v.clone().detach().cpu() for k, v in model.state_dict().items()}
-    delta = compute_weight_delta(before, after)
-
-    # prepare model for return: move to CPU and set eval
+    # Decide whether supervised or unsupervised:
+    supervised = False
     try:
-        model = model.to("cpu")
+        unique = torch.unique(y).numel()
+        supervised = (unique >= 2)
     except Exception:
-        # if moving fails for some reason, keep as-is (but normally it will succeed)
-        pass
-    model.eval()
+        supervised = False
 
-    # record constructor/init params to help re-instantiation if needed elsewhere
-    try:
-        model._init_params = {"input_dim": input_dim}
-    except Exception:
-        # ignore if model doesn't allow attribute assignment
-        pass
+    if supervised:
+        # Decide classification or regression
+        is_classification = (y.dtype == torch.long) or (len(torch.unique(y)) <= 20 and y.dtype != torch.float32)
 
-    return delta, model
+        # Build dataset; if rag augmentation requested, X should already be augmented by caller
+        model = SimpleMLP(input_dim, hidden_dims=(256, 128), output_dim=(len(torch.unique(y)) if is_classification else 1))
+        model = model.to(device)
+
+        loss_fn = nn.CrossEntropyLoss() if is_classification else nn.MSELoss()
+        opt = optim.Adam(model.parameters(), lr=lr)
+
+        dataset = TensorDataset(X, y.to(device))
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        init_state = {k: v.clone().detach() for k, v in model.state_dict().items()}
+
+        for epoch in range(max(1, epochs)):
+            model.train()
+            running = 0.0
+            for xb, yb in loader:
+                xb = xb.to(device)
+                yb = yb.to(device)
+                opt.zero_grad()
+                out = model(xb)
+                if is_classification:
+                    # out shape (B,C)
+                    loss = loss_fn(out, yb.long())
+                else:
+                    out = out.view(-1)
+                    loss = loss_fn(out, yb.float())
+                loss.backward()
+                opt.step()
+                running += float(loss.item())
+            # print small progress-less verbose
+        final_state = {k: v.clone().detach() for k, v in model.state_dict().items()}
+        # delta = final - init
+        delta = {}
+        for k in final_state.keys():
+            delta[k] = (final_state[k].cpu() - init_state[k].cpu())
+        return delta, model
+
+    else:
+        # Unsupervised: train autoencoder to reconstruct X; return encoder delta & model
+        ae = AutoEncoder(input_dim, bottleneck=min(64, max(8, input_dim // 8)), hidden=(256, 128))
+        ae = ae.to(device)
+        opt = optim.Adam(ae.parameters(), lr=lr)
+        loss_fn = nn.MSELoss()
+
+        dataset = TensorDataset(X)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        init_state = {k: v.clone().detach() for k, v in ae.state_dict().items()}
+        for epoch in range(max(1, epochs)):
+            ae.train()
+            for (xb,) in loader:
+                xb = xb.to(device)
+                opt.zero_grad()
+                recon = ae(xb)
+                loss = loss_fn(recon, xb)
+                loss.backward()
+                opt.step()
+
+        final_state = {k: v.clone().detach() for k, v in ae.state_dict().items()}
+        # delta = final - init
+        delta = {}
+        for k in final_state.keys():
+            delta[k] = (final_state[k].cpu() - init_state[k].cpu())
+        # return the full AE model (so caller can attempt apply_delta_to_model)
+        return delta, ae

@@ -49,8 +49,12 @@ class SecureStore:
     def _derive_key(self, context: str) -> bytes:
         """
         Derive a per-agent, per-directory key using HKDF.
-        Context = f"{agent}:{directory}"
+        Context normalization ensures identical keys for same session across agents.
         """
+        # Normalize context to avoid mismatch between trainer and DP agent
+        if "local_updates" in context:
+            context = context.split("local_updates")[0].rstrip("/")
+
         info = f"{self.agent}:{context}".encode()
         hkdf = HKDF(
             algorithm=hashes.SHA256(),

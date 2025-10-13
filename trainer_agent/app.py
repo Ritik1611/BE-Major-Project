@@ -6,9 +6,9 @@ from typing import Dict, Any
 from trainer import train_model
 from utils import read_embeddings_from_parquet
 
-# 👇 centralized imports
-from ..centralized_secure_store import SecureStore
-from ..centralised_receipts import CentralReceiptManager
+# centralized imports (absolute paths for standalone run)
+from centralized_secure_store import SecureStore
+from centralised_receipts import CentralReceiptManager
 
 
 def train(
@@ -30,12 +30,12 @@ def train(
     # 2) Read embeddings
     embs = read_embeddings_from_parquet(session_parquet)
     if len(embs) == 0:
-        raise RuntimeError("No embeddings found in parquet")
+        raise RuntimeError(f"No embeddings found in parquet: {session_parquet}")
 
     X = torch.tensor(embs, dtype=torch.float32)
-    y = torch.zeros(X.shape[0], dtype=torch.long)  # dummy labels for demo
+    y = torch.zeros(X.shape[0], dtype=torch.long)  # dummy labels for now
 
-    # 3) Train model -> delta update
+    # 3) Train model → delta update
     delta, _ = train_model(
         X, y,
         input_dim=X.shape[1],

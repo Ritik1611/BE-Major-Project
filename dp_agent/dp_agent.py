@@ -1,20 +1,26 @@
 # dp_agent/dp_agent.py
 import os, io, time, torch
+from pathlib import Path
+from typing import Optional, Dict, Any
 
 # 👇 centralized receipts + secure store
 from centralised_receipts import CentralReceiptManager
 from centralized_secure_store import SecureStore
 
-
 class DPAgent:
-    SUPPORTED_MECHANISMS = {"gaussian", "laplace", "uniform", "exponential", "none"}
+    SUPPORTED_MECHANISMS = {
+        "gaussian", "laplace", "uniform", "exponential", "student_t", "none"
+    }
 
-    def __init__(self,
-                 clip_norm=1.0,
-                 noise_multiplier=1.0,
-                 mechanism="gaussian",   # 🔹 support many noise types
-                 secure_store_dir="secure_store/local_updates",
-                 receipts_dir="receipts"):
+    def __init__(
+        self,
+        clip_norm: float = 1.0,
+        noise_multiplier: float = 1.0,
+        mechanism: str = "gaussian",
+        secure_store_dir: str = "secure_store/local_updates",
+        receipts_dir: str = "receipts",
+        store: Optional['SecureStore'] = None
+    ):
         self.clip = float(clip_norm)
         self.noise_multiplier = float(noise_multiplier)
         self.mechanism = mechanism.lower()
@@ -23,8 +29,12 @@ class DPAgent:
         os.makedirs(self.secure_store_dir, exist_ok=True)
         os.makedirs(self.receipts_dir, exist_ok=True)
 
-        # Centralized SecureStore
-        self.store = SecureStore("./secure_store")
+        # ✅ Reuse centralized SecureStore if provided (avoids key mismatch)
+        if store is not None:
+            self.store = store
+        else:
+            # Default to explicit named args to avoid positional mismatch
+            self.store = SecureStore(agent="dp-agent", root="./secure_store")
 
         # Centralized receipt manager
         self.rm = CentralReceiptManager()
@@ -60,52 +70,43 @@ class DPAgent:
         return new_sd
 
     # ---------- noise helper ----------
-    def add_noise(self, flat: torch.Tensor) -> torch.Tensor:
+    def add_noise(self, x: torch.Tensor, sensitivity: float = 1.0):
         """
-        Apply DP noise to a flattened tensor using the chosen mechanism.
+        Add noise to flat tensor x according to mechanism and noise_multiplier.
+        Uses small epsilon to avoid zero-scale problems.
         """
-        if flat.numel() == 0:
-            return flat
+        if self.noise_multiplier == 0.0 or self.mechanism == "none":
+            return x  # no noise applied
 
-        if self.mechanism == "none":
-            return flat  # no noise applied
+        eps = 1e-8
+        scale = max(eps, self.noise_multiplier * sensitivity)
 
-        elif self.mechanism == "gaussian":
-            std = self.noise_multiplier * self.clip
-            noise = torch.normal(0.0, std, size=flat.shape)
-
+        if self.mechanism == "gaussian":
+            noise = torch.normal(0.0, scale, size=x.shape)
         elif self.mechanism == "laplace":
-            scale = self.noise_multiplier * self.clip
-            if scale == 0.0:
-                return flat  # no noise if scale is 0
-            dist = torch.distributions.Laplace(0.0, scale)
-            noise = dist.sample(flat.shape)
-
+            # torch.distributions.Laplace requires scale > 0
+            noise = torch.distributions.Laplace(0.0, scale).sample(x.shape)
         elif self.mechanism == "uniform":
-            # Uniform noise in [-a, a] where a = noise_multiplier * clip
-            a = self.noise_multiplier * self.clip
-            noise = (2 * a) * torch.rand(flat.shape) - a
-
+            # uniform in [-scale, scale]
+            noise = torch.empty_like(x).uniform_(-scale, scale)
         elif self.mechanism == "exponential":
-            # Signed exponential: symmetric around 0
-            scale = self.noise_multiplier * self.clip
-            dist = torch.distributions.Exponential(1.0 / (scale + 1e-8))
-            samples = dist.sample(flat.shape)
-            # Randomly flip sign
-            signs = torch.randint(0, 2, flat.shape) * 2 - 1
-            noise = samples * signs
-
+            # Exponential with scale > 0; create signed exponential
+            sign = torch.randint(0, 2, x.shape, dtype=torch.float32) * 2.0 - 1.0
+            # Exponential(rate) in torch uses rate parameter; torch.distributions.Exponential(scale) expects scale > 0
+            noise = sign * torch.distributions.Exponential(scale).sample(x.shape)
+        elif self.mechanism == "student_t":
+            df = 10.0
+            noise = torch.distributions.StudentT(df).sample(x.shape) * scale
         else:
-            raise ValueError(f"Unsupported mechanism: {self.mechanism}")
-
-        return flat + noise
+            raise ValueError(f"Unknown mechanism {self.mechanism}")
+        return x + noise
 
     # ---------- core DP processing ----------
     def process_local_update(self, local_update_uri: str, metadata: dict = None):
         """
         local_update_uri: 'file://<path>'
         metadata: optional dict (trainer's receipt fields)
-        returns: dp_receipt dict
+        returns: {'receipt': receipt, 'receipt_uri': receipt_uri}
         """
         metadata = metadata or {}
         assert local_update_uri.startswith("file://"), "Demo expects file:// URIs"
@@ -114,45 +115,45 @@ class DPAgent:
         if not os.path.exists(path):
             raise FileNotFoundError(f"DPAgent: update not found: {path}")
 
-        # 1) read encrypted trainer update and decrypt
+        # read encrypted trainer update and decrypt
         decrypted = self.store.decrypt_read("file://" + path)
 
-        # 2) load state_dict from bytes
+        # load state_dict from bytes
         buf = io.BytesIO(decrypted)
         state_dict = torch.load(buf, map_location="cpu")
 
-        # 3) flatten
+        # flatten
         flat, meta = self.flatten_state_dict(state_dict)
         l2_before = float(torch.norm(flat, p=2).item()) if flat.numel() > 0 else 0.0
 
-        # 4) clip
+        # clip
         clipped = False
         if flat.numel() > 0 and l2_before > self.clip:
-            flat = flat * (self.clip / l2_before)
+            flat = flat * (self.clip / (l2_before + 1e-12))
             clipped = True
 
-        # 5) add noise (based on mechanism)
-        noisy = self.add_noise(flat)
+        # add noise (based on mechanism)
+        noisy = self.add_noise(flat, sensitivity=1.0)  # sensitivity heuristic = 1.0
         l2_after = float(torch.norm(noisy, p=2).item()) if noisy.numel() > 0 else 0.0
 
-        # 6) unflatten back to state_dict
+        # unflatten back to state_dict
         noisy_sd = self.unflatten_state_dict(noisy, meta)
 
-        # 7) serialize
+        # serialize
         out_buf = io.BytesIO()
         torch.save(noisy_sd, out_buf)
         out_bytes = out_buf.getvalue()
 
-        # 8) save encrypted DP update
+        # save encrypted DP update
         ts = int(time.time() * 1000)
         out_fname = f"dp_{self.mechanism}_{ts}.pt.enc"
         out_path = os.path.join(self.secure_store_dir, out_fname)
         self.store.encrypt_write("file://" + out_path, out_bytes)
 
-        # 9) build centralized receipt
+        # build centralized receipt
         receipt = self.rm.create_receipt(
             agent="dp-agent",
-            session_id=metadata.get("session_id"),  # inherit from trainer if exists
+            session_id=metadata.get("session_id"),
             operation="dp_process_update",
             params={
                 "clip_norm": self.clip,
@@ -165,7 +166,7 @@ class DPAgent:
             outputs=["file://" + out_path],
         )
 
-        # 10) write receipt to disk
+        # write receipt to disk
         receipt_uri = self.rm.write_receipt(receipt, out_dir=self.receipts_dir)
 
         return {"receipt": receipt, "receipt_uri": receipt_uri}

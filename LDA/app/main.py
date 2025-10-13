@@ -90,7 +90,8 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
     Processes inputs according to req.mode.
     """
     cfg = _load_config(req.config_uri)
-    store = SecureStore(cfg["storage"]["root"])
+    # create SecureStore with explicit named argument 'root'
+    store = SecureStore(root=cfg["storage"]["root"])
     rm = CentralReceiptManager()
 
     openface_bin = cfg["ingest"]["video"]["params"]["openface"]["binary_path"]
@@ -171,13 +172,30 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
         # TEXT
         if cfg.get("ingest", {}).get("text", {}).get("enabled", False) and req.inputs.get("text_dir"):
             tdir = Path(req.inputs["text_dir"])
-            rows = process_text_file(tdir, cfg, session_id)
+            # pass the SecureStore instance and an out_dir where text preprocessor will write
+            out_dir_for_text = Path(cfg["storage"]["root"]) / session_id / "text"
+            rows = process_text_file(str(tdir), store, str(out_dir_for_text), session_id=session_id)
             uri, ruri = _write_parquet_encrypted(store, rm, session_id, "text", rows)
             if uri:
                 outputs.append(uri)
                 receipts.append(ruri)
                 for i, _ in enumerate(rows):
                     manifest.append({"session_id": session_id, "modality": "text", "uri": uri, "row": i})
+
+        # Similarly in 'text' mode:
+        elif mode == "text":
+            if req.inputs.get("text_dir"):
+                tdir = Path(req.inputs["text_dir"])
+                out_dir_for_text = Path(cfg["storage"]["root"]) / session_id / "text"
+                rows = process_text_file(str(tdir), store, str(out_dir_for_text), session_id=session_id)
+                uri, ruri = _write_parquet_encrypted(store, rm, session_id, "text", rows)
+                if uri:
+                    outputs.append(uri)
+                    receipts.append(ruri)
+                    for i, _ in enumerate(rows):
+                        manifest.append({"session_id": session_id, "modality": "text", "uri": uri, "row": i})
+            else:
+                raise RuntimeError("mode 'text' requires 'text_dir' in inputs")
 
     # -----------------------------
     # TEXT ONLY
