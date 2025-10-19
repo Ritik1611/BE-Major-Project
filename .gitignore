@@ -8,4 +8,5 @@ secure_store/*
 receipts/*
 results/*
 decrypted_output/*
-trainer_outputs/*trainer_outputs/mentalbert_privacy_subset.pt
+trainer_outputs/mentalbert_privacy_subset.pt
+trainer_outputs/local_probe*

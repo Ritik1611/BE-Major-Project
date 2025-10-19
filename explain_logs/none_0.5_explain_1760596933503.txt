@@ -1,0 +1,2 @@
+Explainability fallback for none nm=0.5 mode=rag
+Feature importances not available; DP noise applied successfully.

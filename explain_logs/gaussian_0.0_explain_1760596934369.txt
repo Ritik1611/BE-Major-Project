@@ -1,0 +1,2 @@
+Explainability fallback for gaussian nm=0.0 mode=vector_rag
+Feature importances not available; DP noise applied successfully.

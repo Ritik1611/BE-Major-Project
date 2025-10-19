@@ -402,9 +402,9 @@ def train_model(dataset: MultiModalDataset, model: MultiModalModel,
             y_true_phq.extend(b["phq"].cpu().tolist())
             y_pred_phq.extend(reg_pred.cpu().tolist())
 
-    acc = accuracy_score(y_true_cls, y_pred_cls)
-    prec, rec, f1, _ = precision_recall_fscore_support(y_true_cls, y_pred_cls, average="binary")
-    mae = mean_absolute_error(y_true_phq, y_pred_phq)
+    acc = accuracy_score(y_true_cls, y_pred_cls) if y_true_cls else 0.0
+    prec, rec, f1, _ = precision_recall_fscore_support(y_true_cls, y_pred_cls, average="binary") if y_true_cls else (0.0, 0.0, 0.0, None)
+    mae = mean_absolute_error(y_true_phq, y_pred_phq) if y_true_phq else 0.0
 
     metrics = {
         "accuracy": float(acc),
@@ -416,30 +416,42 @@ def train_model(dataset: MultiModalDataset, model: MultiModalModel,
 
     # ---------- Explainability ----------
     explain_path = os.path.join(output_dir, "explain.txt")
-    with open(explain_path, "w") as f:
-        f.write("=== Explainability Report ===\n")
-        f.write(f"Metrics: {json.dumps(metrics, indent=2)}\n\n")
-        try:
-            first_batch = next(iter(loader))
-            importance = modality_ablation_importance(model, first_batch, device=device)
-            f.write("Modality contributions (approx):\n")
-            for k, v in importance["raw"].items():
-                f.write(f"  {k}: {v:.4f}\n")
-        except Exception as e:
-            f.write(f"[WARN] Explainability failed: {e}\n")
+    try:
+        with open(explain_path, "w") as f:
+            f.write("=== Explainability Report ===\n")
+            f.write(f"Metrics: {json.dumps(metrics, indent=2)}\n\n")
+            try:
+                first_batch = next(iter(loader))
+                importance = modality_ablation_importance(model, first_batch, device=device)
+                f.write("Modality contributions (approx):\n")
+                for k, v in importance["raw"].items():
+                    f.write(f"  {k}: {v:.4f}\n")
+            except Exception as e:
+                f.write(f"[WARN] Explainability failed: {e}\n")
+    except Exception as e:
+        print(f"[WARN] Could not write explain.txt: {e}")
 
     # ---------- Save everything ----------
     model_path = os.path.join(output_dir, "mentalbert_privacy_subset.pt")
     torch.save(model.state_dict(), model_path)
-    with open(os.path.join(output_dir, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=2)
+
+    # ---- write metrics.json for downstream consumers ----
+    metrics_json_path = os.path.join(output_dir, "metrics.json")
+    try:
+        with open(metrics_json_path, "w") as mf:
+            json.dump(metrics, mf, indent=2)
+        print(f"[train_model] metrics saved → {metrics_json_path}")
+    except Exception as e:
+        print(f"[WARN] Could not write metrics.json: {e}")
+
+    # Also write a receipt-like file (existing behavior)
+    with open(os.path.join(output_dir, "metrics_report.json"), "w") as f:
+        json.dump({"model_path": model_path, "metrics": metrics}, f, indent=2)
 
     print(f"[train_model] model saved → {model_path}")
-    print(f"[train_model] metrics saved → metrics.json, explain.txt")
-
     return {
         "model_path": model_path,
-        "metrics_path": os.path.join(output_dir, "metrics.json"),
+        "metrics_path": metrics_json_path,
         "explain_path": explain_path,
         "metrics": metrics
     }
@@ -628,7 +640,9 @@ def physician_feedback_cli(preds: List[Dict[str, Any]], texts: List[str]) -> Lis
 
 
 # ---------- Orchestrator ----------
-def orchestrate(input_path: str, mode: str = "autonomous", device: str = DEFAULT_DEVICE, epochs: int = 1, batch_size: int = 8, lr: float = 2e-5, rl_supervised_lambda: float = 0.0, max_samples: Optional[int] = None, safety_params: Dict[str, float] = None):
+def orchestrate(input_path: str, mode: str = "autonomous", device: str = DEFAULT_DEVICE, epochs: int = 1, batch_size: int = 8, lr: float = 2e-5, rl_supervised_lambda: float = 0.0, max_samples: Optional[int] = None, safety_params: Dict[str, float] = None, **kwargs):
+    rag_k = kwargs.get("rag_k", None)
+    rag_mode = kwargs.get("rag_mode", None)
     records = read_parquet_records(input_path)
     if max_samples:
         records = records[:max_samples]

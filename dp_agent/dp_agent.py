@@ -115,42 +115,48 @@ class DPAgent:
         if not os.path.exists(path):
             raise FileNotFoundError(f"DPAgent: update not found: {path}")
 
-        # read encrypted trainer update and decrypt
-        decrypted = self.store.decrypt_read("file://" + path)
+        # Try to decrypt; fallback to raw read
+        try:
+            decrypted = self.store.decrypt_read("file://" + path)
+        except Exception as e:
+            print(f"[WARN] File not encrypted or decrypt failed ({e}); reading raw bytes.")
+            with open(path, "rb") as f:
+                decrypted = f.read()
 
-        # load state_dict from bytes
+        # Load model state dict from bytes
         buf = io.BytesIO(decrypted)
-        state_dict = torch.load(buf, map_location="cpu")
+        try:
+            state_dict = torch.load(buf, map_location="cpu")
+        except Exception as e:
+            raise RuntimeError(f"[ERROR] Failed to load model state_dict from {path}: {e}")
 
-        # flatten
+        # Flatten parameters
         flat, meta = self.flatten_state_dict(state_dict)
         l2_before = float(torch.norm(flat, p=2).item()) if flat.numel() > 0 else 0.0
 
-        # clip
+        # Clip gradient norm
         clipped = False
         if flat.numel() > 0 and l2_before > self.clip:
             flat = flat * (self.clip / (l2_before + 1e-12))
             clipped = True
 
-        # add noise (based on mechanism)
-        noisy = self.add_noise(flat, sensitivity=1.0)  # sensitivity heuristic = 1.0
+        # Add noise
+        noisy = self.add_noise(flat, sensitivity=1.0)
         l2_after = float(torch.norm(noisy, p=2).item()) if noisy.numel() > 0 else 0.0
 
-        # unflatten back to state_dict
+        # Reconstruct and re-serialize model
         noisy_sd = self.unflatten_state_dict(noisy, meta)
-
-        # serialize
         out_buf = io.BytesIO()
         torch.save(noisy_sd, out_buf)
         out_bytes = out_buf.getvalue()
 
-        # save encrypted DP update
+        # Save new encrypted DP update
         ts = int(time.time() * 1000)
         out_fname = f"dp_{self.mechanism}_{ts}.pt.enc"
         out_path = os.path.join(self.secure_store_dir, out_fname)
         self.store.encrypt_write("file://" + out_path, out_bytes)
 
-        # build centralized receipt
+        # Create centralized receipt
         receipt = self.rm.create_receipt(
             agent="dp-agent",
             session_id=metadata.get("session_id"),
@@ -166,7 +172,14 @@ class DPAgent:
             outputs=["file://" + out_path],
         )
 
-        # write receipt to disk
         receipt_uri = self.rm.write_receipt(receipt, out_dir=self.receipts_dir)
-
-        return {"receipt": receipt, "receipt_uri": receipt_uri}
+        return {
+            "receipt": receipt,
+            "receipt_uri": receipt_uri,
+            "update_uri": "file://" + out_path,
+            "l2_norm_before": l2_before,
+            "l2_norm_after": l2_after,
+        }
+    
+    # alias for backward compatibility with create_dp_comparison
+    process_update = process_local_update

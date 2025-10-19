@@ -5,20 +5,19 @@
     "file:///home/ritik26/Desktop/BE-Major-Project/trainer_outputs/mentalbert_privacy_subset.pt"
   ],
   "metrics": {
-    "train_avg_loss_estimate": 114.12493133544922,
-    "val_mae": 1.025213360786438,
-    "val_accuracy": 0.0,
-    "val_precision": 0.0,
-    "val_recall": 0.0,
-    "val_f1": 0.0,
-    "num_train_samples": 2,
+    "train_avg_loss_estimate": 133.5410614013672,
+    "val_mae": 14.316766321659088,
+    "val_accuracy": 1.0,
+    "val_precision": 1.0,
+    "val_recall": 1.0,
+    "val_f1": 1.0,
+    "num_train_samples": 1,
     "num_val_samples": 1
   },
-  "participants_used": 3,
+  "participants_used": 2,
   "participant_ids": [
-    "315",
-    "309",
-    "318"
+    "330",
+    "309"
   ],
   "tasks": [
     "PHQ8_regression",

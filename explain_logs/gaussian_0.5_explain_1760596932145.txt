@@ -1,0 +1,2 @@
+Explainability fallback for gaussian nm=0.5 mode=base
+Feature importances not available; DP noise applied successfully.

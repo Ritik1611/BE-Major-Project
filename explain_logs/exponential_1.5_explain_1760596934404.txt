@@ -1,0 +1,2 @@
+Explainability fallback for exponential nm=1.5 mode=vector_rag
+Feature importances not available; DP noise applied successfully.
