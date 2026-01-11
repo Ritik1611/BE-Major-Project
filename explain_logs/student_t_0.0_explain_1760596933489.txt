@@ -1,2 +1,0 @@
-Explainability fallback for student_t nm=0.0 mode=rag
-Feature importances not available; DP noise applied successfully.

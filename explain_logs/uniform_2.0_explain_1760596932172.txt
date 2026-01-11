@@ -1,2 +1,0 @@
-Explainability fallback for uniform nm=2.0 mode=base
-Feature importances not available; DP noise applied successfully.

@@ -1,0 +1,8 @@
+[server]
+addr = "0.0.0.0:50051"
+
+[tls]
+ca_cert = "certs/ca.pem"
+ca_key = "certs/ca.key"
+server_cert = "certs/server.pem"
+server_key = "certs/server.key"

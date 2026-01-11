@@ -1,0 +1,39 @@
+syntax = "proto3";
+package orchestrator;
+
+service Orchestrator {
+  rpc RegisterDevice (CSR) returns (Certificate);
+  rpc GetRound (DeviceId) returns (RoundMetadata);
+  rpc SubmitReceipt (Receipt) returns (Ack);
+}
+
+message CSR {
+  bytes device_pubkey = 1;
+}
+
+message Certificate {
+  bytes pem = 1;
+}
+
+message DeviceId {
+  bytes id = 1;
+}
+
+message RoundMetadata {
+  uint64 round_id = 1;
+  string model_version = 2;
+  double epsilon_max = 3;
+  string upload_uri = 4;
+}
+
+message Receipt {
+  bytes device_id = 1;
+  uint64 round_id = 2;
+  bytes payload_hash = 3;
+  double epsilon_spent = 4;
+  bytes signature = 5;
+}
+
+message Ack {
+  bool ok = 1;
+}
