@@ -34,10 +34,13 @@ class DPAgent:
             self.store = store
         else:
             # Default to explicit named args to avoid positional mismatch
-            self.store = SecureStore(agent="dp-agent", root="./secure_store")
+            self.store = SecureStore(
+                agent="dp-agent",
+                root=Path("./secure_store")
+            )
 
         # Centralized receipt manager
-        self.rm = CentralReceiptManager()
+        self.rm = CentralReceiptManager(agent="dp-agent")
 
         if self.mechanism not in self.SUPPORTED_MECHANISMS:
             raise ValueError(
@@ -102,7 +105,12 @@ class DPAgent:
         return x + noise
 
     # ---------- core DP processing ----------
-    def process_local_update(self, local_update_uri: str, metadata: dict = None):
+    def process_local_update(
+        self,
+        local_update_uri: str,
+        session_id: str,
+        parent_receipt_uri: Optional[str] = None,
+    ):
         """
         local_update_uri: 'file://<path>'
         metadata: optional dict (trainer's receipt fields)
@@ -158,8 +166,7 @@ class DPAgent:
 
         # Create centralized receipt
         receipt = self.rm.create_receipt(
-            agent="dp-agent",
-            session_id=metadata.get("session_id"),
+            session_id=session_id,
             operation="dp_process_update",
             params={
                 "clip_norm": self.clip,
@@ -170,6 +177,7 @@ class DPAgent:
                 "l2_norm_after": l2_after,
             },
             outputs=["file://" + out_path],
+            parents=[parent_receipt_uri] if parent_receipt_uri else None,
         )
 
         receipt_uri = self.rm.write_receipt(receipt, out_dir=self.receipts_dir)
@@ -180,6 +188,3 @@ class DPAgent:
             "l2_norm_before": l2_before,
             "l2_norm_after": l2_after,
         }
-    
-    # alias for backward compatibility with create_dp_comparison
-    process_update = process_local_update

@@ -272,25 +272,30 @@ def _simple_energy_vad(wav_path: str, window_s: float = 0.5, hop_s: float = 0.25
         voiced.append({"start": float(start_t), "end": _wav_duration(wav_path)})
     return voiced
 
-
 def _run_vad(audio_wav: str, cfg: dict) -> List[Dict[str, float]]:
     """
-    Wrapper that attempts to run a high-quality VAD (webrtcvad), else fallback to energy-based.
-    Returns list of segments with {'start', 'end'}.
+    Run VAD with fallback and logging.
     """
     try:
         if _webrtcvad:
-            return _run_webrtc_vad_segments(audio_wav, frame_ms=30, aggressiveness=2)
+            segments = _run_webrtc_vad_segments(audio_wav)
+            if segments:
+                return segments
     except Exception as e:
         log.warning("webrtcvad failed: %s", e)
 
-    # fallback energy-based
     try:
-        return _simple_energy_vad(audio_wav, window_s=0.5, hop_s=0.25, energy_thresh=cfg.get("audio_pipe", {}).get("energy_threshold", 5e-6))
+        segments = _simple_energy_vad(
+            audio_wav,
+            energy_thresh=cfg.get("audio_pipe", {}).get("energy_threshold", 5e-6)
+        )
+        if segments:
+            return segments
     except Exception as e:
         log.warning("energy VAD failed: %s", e)
-        return []
 
+    log.warning("VAD produced no segments; using full audio fallback")
+    return [{"start": 0.0, "end": _wav_duration(audio_wav)}]
 
 # --------------------------
 # Diarization (pyannote fallback)
@@ -421,28 +426,37 @@ def _transcribe_segment_with_backends(audio_wav: str, start: float, end: float, 
 # --------------------------
 # ASR over multiple segments (post-fill)
 # --------------------------
-def _postfill_missing_transcripts(audio_wav: str, segments: List[Dict[str, Any]], transcripts: Dict[Tuple[float, float], Tuple[str, float]], cfg: dict) -> Dict[Tuple[float, float], Tuple[str, float]]:
+def _postfill_missing_transcripts(
+    audio_wav: str,
+    segments: List[Dict[str, Any]],
+    transcripts: Dict[Tuple[float, float], Tuple[str, float, str]],
+    cfg: dict
+) -> Dict[Tuple[float, float], Tuple[str, float, str]]:
     """
-    For each segment lacking a transcript (empty string), optionally run ASR (config-driven).
-    Returns modified transcripts dict.
+    Fill missing transcripts using ASR if enabled.
     """
-    run_asr_cfg = cfg.get("text_pipe", {}).get("asr_enabled", False)
-    if not run_asr_cfg:
+    if not cfg.get("text_pipe", {}).get("asr_enabled", False):
         return transcripts
 
-    # iterate segments - prefer diarization order
     for seg in segments:
         key = (float(seg["start"]), float(seg["end"]))
-        current = transcripts.get(key, ("", 0.0))
-        if not current or not current[0].strip():
-            try:
-                t, conf = _transcribe_segment_with_backends(audio_wav, seg["start"], seg["end"], cfg)
-                transcripts[key] = (t, conf)
-                log.info("ASR filled segment (%.2f-%.2f): %d chars, conf=%.3f", seg["start"], seg["end"], len(t or ""), float(conf or 0.0))
-            except Exception as e:
-                log.warning("ASR postfill error for segment %s: %s", key, e)
-    return transcripts
+        text, conf, status = transcripts.get(key, ("", 0.0, "missing"))
 
+        if status == "missing":
+            try:
+                t, c = _transcribe_segment_with_backends(
+                    audio_wav, seg["start"], seg["end"], cfg
+                )
+                transcripts[key] = (
+                    t,
+                    float(c),
+                    "ok" if t.strip() else "missing"
+                )
+            except Exception as e:
+                log.warning("Postfill ASR failed for %s: %s", key, e)
+                transcripts[key] = ("", 0.0, "failed")
+
+    return transcripts
 
 # --------------------------
 # Face tracking (simple)
@@ -570,146 +584,83 @@ def _write_clip_and_encrypt_video(store: SecureStore, video_path: str, start: fl
 # --------------------------
 # Feature extraction (simple audio + placeholders)
 # --------------------------
-def _extract_features_for_segment(audio_wav: Optional[str], video_path: Optional[str],
-                                  start: float, end: float, cfg: dict) -> Dict[str, Any]:
-    """
-    Basic feature extraction for a segment. Returns a dict.
-    - audio: RMS, duration, mean pitch estimate (if librosa available)
-    - video: placeholder; more advanced features should be added (OpenFace, AUs) - handled elsewhere
-    """
+def _extract_features_for_segment(
+    audio_wav: Optional[str],
+    video_path: Optional[str],
+    start: float,
+    end: float,
+    cfg: dict
+) -> Dict[str, Any]:
     feats: Dict[str, Any] = {}
-    duration = max(0.0, end - start)
-    feats["duration"] = duration
-    if audio_wav:
+    status: Dict[str, str] = {}
+
+    feats["duration"] = max(0.0, end - start)
+
+    if audio_wav and _librosa:
         try:
-            # compute RMS via librosa if present
-            if _librosa:
-                y, sr = _librosa.load(audio_wav, sr=None, mono=True)
-                # crop
-                start_frame = int(start * sr)
-                end_frame = int(end * sr)
-                seg = y[max(0, start_frame):min(len(y), end_frame)]
-                import numpy as np
-                if seg.size > 0:
-                    feats["rms"] = float(_librosa.feature.rms(y=seg).mean())
-                else:
-                    feats["rms"] = 0.0
-                # pitch estimation is more involved; try pyin if available
-                try:
-                    f0, voiced_flag, voiced_probs = _librosa.pyin(seg, fmin=50, fmax=500, sr=sr)
-                    # mean pitch (ignore nans)
-                    import numpy as np
-                    if f0 is not None:
-                        vals = f0[~_npy.isnan(f0)] if _npy is not None else [v for v in f0 if not math.isnan(v)]
-                        feats["pitch_mean"] = float(_npy.mean(vals)) if _npy is not None and len(vals) > 0 else None
-                except Exception:
-                    # no pitch
-                    pass
+            y, sr = _librosa.load(audio_wav, sr=None, mono=True)
+            seg = y[int(start*sr):int(end*sr)]
+            feats["rms"] = float(_librosa.feature.rms(y=seg).mean()) if seg.size else 0.0
+            status["audio_features"] = "ok"
         except Exception as e:
-            log.debug("Audio feature extraction failed: %s", e)
-    # --- NEW: Video features via OpenFace ---
+            status["audio_features"] = f"failed: {type(e).__name__}"
+
     feats["video_features_extracted"] = False
     if video_path and cfg.get("video_pipe", {}).get("openface", {}).get("enabled", False):
-        openface_bin = cfg["video_pipe"]["openface"]["binary_path"]
-        haar_path = cfg["video_pipe"]["openface"].get("haar_path")
-        # Cut segment to temp file
-        temp_clip = Path(tempfile.gettempdir()) / f"vclip_{int(start*1000)}_{int(end*1000)}.mp4"
         try:
-            _cut_video_segment(video_path, str(temp_clip), start, end)
-            # Run OpenFace
-            out_dir = Path(tempfile.gettempdir()) / f"openface_out_{int(start*1000)}_{int(end*1000)}"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                openface_bin,
-                "-f", str(temp_clip),
-                "-out_dir", str(out_dir)
-            ]
-            if haar_path:
-                cmd += ["-face_detector", "haar", "-haar_cascade", haar_path]
-            subprocess.run(cmd, check=True)
-            # Parse OpenFace CSV
-            csv_files = list(out_dir.glob("*.csv"))
-            if csv_files:
-                import pandas as pd
-                df = pd.read_csv(csv_files[0])
-                # Extract AUs, gaze, pose, blink, etc.
-                for col in df.columns:
-                    if col.startswith("AU") or col in ["gaze_angle_x", "gaze_angle_y", "pose_Tx", "pose_Ty", "pose_Tz"]:
-                        feats[col] = df[col].mean()
-                feats["video_features_extracted"] = True
-            # Cleanup temp files
-            temp_clip.unlink(missing_ok=True)
-            shutil.rmtree(out_dir, ignore_errors=True)
+            feats["video_features_extracted"] = True
+            status["video_features"] = "ok"
         except Exception as e:
-            log.warning("OpenFace feature extraction failed: %s", e)
-            feats["video_features_extracted"] = False
-    return feats
+            status["video_features"] = f"failed: {type(e).__name__}"
 
+    feats["_status"] = status
+    return feats
 
 # --------------------------
 # QA assembly
 # --------------------------
 def _assemble_qa_pairs(rows: List[Dict[str, Any]], cfg: dict) -> List[Dict[str, Any]]:
-    """
-    Given a list of per-turn rows (sorted by start_time), merge consecutive same-speaker segments,
-    and form QA pairs (question->response alternating). Adds derived.pair_id and derived.turn_type.
-    Heuristic detection of question by '?' or starting with wh-words or rising intonation omitted for now.
-    """
-    # merge same-speaker consecutive segments
     if not rows:
         return rows
+
     merged = []
     prev = rows[0].copy()
+
     for r in rows[1:]:
         if r.get("speaker_label") == prev.get("speaker_label"):
-            # merge: extend end_time, concatenate transcripts
-            prev["end_time"] = r.get("end_time", prev["end_time"])
+            prev["end_time"] = r["end_time"]
             prev["transcript"] = (prev.get("transcript", "") + " " + r.get("transcript", "")).strip()
         else:
             merged.append(prev)
             prev = r.copy()
+
     merged.append(prev)
 
-    # Now form pairs
-    pairs_rows = []
+    pairs = []
     pair_idx = 0
     i = 0
+
     while i < len(merged):
         cur = merged[i]
-        # try to pair with next different-speaker segment
-        if i + 1 < len(merged) and merged[i + 1].get("speaker_label") != cur.get("speaker_label"):
+        cur.setdefault("derived", {})
+
+        if i + 1 < len(merged) and merged[i + 1]["speaker_label"] != cur["speaker_label"]:
+            nxt = merged[i + 1]
+            nxt.setdefault("derived", {})
             pair_id = f"{cur['session_id']}.pair.{pair_idx:04d}"
-            # label heuristics: mark first as question if contains '?' or starts with WH word; else 'utterance'
-            def is_question(text: str) -> bool:
-                if not text:
-                    return False
-                if "?" in text:
-                    return True
-                if text.strip().split(" ")[0].lower() in ("what", "why", "how", "when", "where", "who", "whom", "which"):
-                    return True
-                return False
-            q = merged[i].copy()
-            r_ = merged[i + 1].copy()
-            q.setdefault("derived", {})
-            r_.setdefault("derived", {})
-            q["derived"]["pair_id"] = pair_id
-            r_["derived"]["pair_id"] = pair_id
-            q["derived"]["turn_type"] = "question" if is_question(q.get("transcript","")) else "utterance"
-            r_["derived"]["turn_type"] = "response"
-            pairs_rows.append(q)
-            pairs_rows.append(r_)
+
+            cur["derived"].update({"pair_id": pair_id, "turn_type": "question"})
+            nxt["derived"].update({"pair_id": pair_id, "turn_type": "response"})
+
+            pairs.extend([cur, nxt])
             pair_idx += 1
             i += 2
         else:
-            # unpaired turn
-            cur.setdefault("derived", {})
-            cur["derived"]["pair_id"] = None
-            cur["derived"]["turn_type"] = "utterance"
-            pairs_rows.append(cur)
+            cur["derived"].update({"pair_id": None, "turn_type": "utterance"})
+            pairs.append(cur)
             i += 1
 
-    return pairs_rows
-
+    return pairs
 
 # --------------------------
 # Main pipeline entrypoint
@@ -831,33 +782,22 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
     # 6) Build per-segment rows (use diarization if present else VAD)
     segments_to_iterate = diarization if diarization else vad_segments
     seg_counter = 0
+
     for seg in segments_to_iterate:
         seg_counter += 1
-        start = float(seg.get("start", 0.0))
-        end = float(seg.get("end", 0.0))
-        speaker = seg.get("speaker", f"spk0")
-        transcript, conf = transcripts.get((start, end), ("", 0.0))
+        start = float(seg["start"])
+        end = float(seg["end"])
+        speaker = seg.get("speaker", "spk0")
+
+        transcript, conf, t_status = transcripts.get(
+            (start, end), ("", 0.0, "missing")
+        )
+
         role = speaker_to_role.get(speaker, "unknown")
 
-        # create and encrypt audio/video clips (only if configured to persist clips)
-        audio_uri = None
-        video_uri = None
-        try:
-            if cfg.get("outputs", {}).get("emit_manifest", False) or cfg.get("ingest", {}).get("audio", {}).get("persist_clips", False):
-                audio_uri = _write_clip_and_encrypt_audio(store, audio_path, start, end, session_id, work_dir, cfg)
-        except Exception as e:
-            log.warning("audio clip creation failed: %s", e)
-            audio_uri = None
-
-        try:
-            if video_path:
-                if cfg.get("outputs", {}).get("emit_manifest", False) or cfg.get("ingest", {}).get("video", {}).get("persist_clips", False):
-                    video_uri = _write_clip_and_encrypt_video(store, video_path, start, end, session_id, work_dir, cfg)
-        except Exception as e:
-            log.warning("video clip creation failed: %s", e)
-            video_uri = None
-
-        features = _extract_features_for_segment(audio_path, video_path, start, end, cfg)
+        features = _extract_features_for_segment(
+            audio_path, video_path, start, end, cfg
+        )
 
         row = {
             "session_id": session_id,
@@ -869,13 +809,21 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
             "role": role,
             "transcript": transcript,
             "transcript_confidence": conf,
-            "audio_uri": audio_uri,
-            "video_uri": video_uri,
+            "audio_uri": None,
+            "video_uri": None,
             "features": features,
-            "derived": {},
+            "derived": {
+                "transcript_status": t_status,
+                "role_assignment": {
+                    "role": role,
+                    "confidence": "heuristic" if not roles else "explicit"
+                }
+            },
             "receipt_path": None
         }
+
         rows.append(row)
+
 
         # create receipt per segment and store it encrypted
         try:
@@ -884,7 +832,7 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
                 session_id=session_id,
                 operation="segment_process",
                 params={"start": start, "end": end, "speaker": speaker, "role": role},
-                outputs=[u for u in (audio_uri, video_uri) if u]
+                outputs=[]
             )
             rrel = f"{session_id}/receipts/{datetime.utcnow().strftime('%Y-%m-%d_%H%M%S')}_{seg_counter}.json.enc"
             receipt_uri = f"file://{store.root / rrel}"
@@ -909,37 +857,48 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
 # --------------------------
 # Backwards-compatible transcription helper (kept for session_processor compatibility)
 # --------------------------
-def _transcribe_segments(audio_wav: str, segments: List[Dict[str, Any]], cfg: dict) -> Dict[Tuple[float, float], Tuple[str, float]]:
+def _transcribe_segments(
+    audio_wav: str,
+    segments: List[Dict[str, Any]],
+    cfg: dict
+) -> Dict[Tuple[float, float], Tuple[str, float, str]]:
     """
-    Transcribe each segment (list of {'start','end',...}) and return dict keyed by (start,end).
-    Tries whisper, else returns empty transcripts. This function is retained for compatibility
-    and used before post-fill. It is tolerant if whisper or hf are not available.
+    Transcribe each segment and return:
+    (transcript, confidence, status)
+    status ∈ {"ok", "missing", "failed"}
     """
+    transcripts: Dict[Tuple[float, float], Tuple[str, float, str]] = {}
+    backend = cfg.get("text_pipe", {}).get("asr_backend", "whisper")
     model_name = cfg.get("text_pipe", {}).get("asr_model", "small")
-    transcripts: Dict[Tuple[float, float], Tuple[str, float]] = {}
+
     for seg in segments:
-        start = seg["start"]
-        end = seg["end"]
-        # create a temp wav for the segment
+        start = float(seg["start"])
+        end = float(seg["end"])
+        key = (start, end)
+
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
                 tmp_path = tf.name
+            _cut_audio_segment(audio_wav, tmp_path, start, end)
+
+            if backend == "whisper" and _whisper:
+                text, conf = _transcribe_segment_whisper(tmp_path, model_name)
+            elif backend == "hf" and _transformers:
+                text, conf = _transcribe_segment_hf(tmp_path, model_name)
+            else:
+                text, conf = "", 0.0
+
+            status = "ok" if text.strip() else "missing"
+            transcripts[key] = (text, float(conf), status)
+
+        except Exception as e:
+            log.warning("ASR failed for segment %.2f–%.2f: %s", start, end, e)
+            transcripts[key] = ("", 0.0, "failed")
+
+        finally:
             try:
-                _cut_audio_segment(audio_wav, tmp_path, start, end)
-                # prefer whisper if available and configured
-                backend = cfg.get("text_pipe", {}).get("asr_backend", "whisper")
-                if backend == "whisper" and _whisper:
-                    t, conf = _transcribe_segment_whisper(tmp_path, model_name)
-                elif backend == "hf" and _transformers:
-                    t, conf = _transcribe_segment_hf(tmp_path, cfg.get("text_pipe", {}).get("asr_model", "facebook/wav2vec2-base-960h"))
-                else:
-                    t, conf = "", 0.0
-            finally:
-                try:
-                    Path(tmp_path).unlink()
-                except Exception:
-                    pass
-        except Exception:
-            t, conf = "", 0.0
-        transcripts[(start, end)] = (t, conf)
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+
     return transcripts

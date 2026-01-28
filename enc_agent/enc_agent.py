@@ -33,7 +33,10 @@ class EncryptionAgent:
         os.makedirs(self.receipts_dir, exist_ok=True)
 
         # Centralized SecureStore
-        self.store = SecureStore("./secure_store")
+        self.store = SecureStore(
+            agent="enc-agent",
+            root="./secure_store"
+        )
 
         # AWS KMS if needed
         self.kms_key_id = kms_key_id
@@ -52,7 +55,7 @@ class EncryptionAgent:
             self.pyfhel.keyGen()
 
         # Centralized receipts
-        self.rm = CentralReceiptManager()
+        self.rm = CentralReceiptManager(agent="enc-agent")
 
     # ---------------- main entry ----------------
     def process_dp_update(self, dp_receipt_path: str) -> Dict[str, Any]:
@@ -87,7 +90,7 @@ class EncryptionAgent:
             self.store.encrypt_write(final_uri, dp_bytes)
 
             meta = {
-                "scheme": "KMS-Envelope",
+                "scheme": "KMS-Envelope-SecureStore",
                 "wrapped_key": base64.b64encode(data_key_ciphertext).decode('utf-8'),
                 "kms_key_id": self.kms_key_id,
             }
@@ -95,9 +98,20 @@ class EncryptionAgent:
         elif self.mode == "he_ckks":
             if not self.pyfhel:
                 raise RuntimeError("Pyfhel not initialized")
-            import numpy as np
-            arr = np.frombuffer(dp_bytes, dtype=np.float32)
-            ptxt = self.pyfhel.encodeFrac(arr.tolist())
+
+            import io
+            import torch
+
+            buf = io.BytesIO(dp_bytes)
+            state_dict = torch.load(buf, map_location="cpu")
+
+            flat = torch.cat([
+                v.detach().flatten().to(torch.float64)
+                for v in state_dict.values()
+                if torch.is_tensor(v)
+            ])
+
+            ptxt = self.pyfhel.encodeFrac(flat.tolist())
             ctxt = self.pyfhel.encryptPtxt(ptxt)
             ctxt_bytes = ctxt.to_bytes()
 
@@ -105,8 +119,9 @@ class EncryptionAgent:
             final_path = os.path.join(self.final_store_dir, f"encdp_ckks_{ts}.bin")
             with open(final_path, "wb") as wf:
                 wf.write(ctxt_bytes)
+
             final_uri = "file://" + final_path
-            meta = {"scheme": "CKKS-Pyfhel"}
+            meta = {"scheme": "CKKS-Pyfhel", "vector_len": len(flat)}
 
         elif self.mode == "smpc":
             N = 3
@@ -130,7 +145,6 @@ class EncryptionAgent:
 
         # Centralized receipt
         receipt = self.rm.create_receipt(
-            agent="enc-agent",
             session_id=dp_receipt.get("session_id"),
             operation="encrypt_update",
             params={
@@ -140,6 +154,7 @@ class EncryptionAgent:
                 "metadata": meta,
             },
             outputs=[final_uri],
+            parents=[dp_receipt_path],
         )
         receipt_uri = self.rm.write_receipt(receipt, out_dir=self.receipts_dir)
 

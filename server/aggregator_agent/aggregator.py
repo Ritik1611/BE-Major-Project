@@ -112,3 +112,51 @@ class AggregatorAgent:
 
         else:
             raise NotImplementedError(f"Unknown aggregation mode: {self.mode}")
+
+    # ------------------------------------------------------------------
+    # Entry point called by Orchestration Agent
+    # ------------------------------------------------------------------
+    def run_job(self, job: Dict) -> Dict:
+        """
+        job format (dict):
+        {
+            "round_id": int,
+            "mode": "trimmed_mean",
+            "trim_ratio": float,
+            "updates": [
+                {
+                    "enc_uri": "...",
+                    "scheme": "...",
+                    "nonce": None
+                }
+            ]
+        }
+        """
+
+        self.mode = job.get("mode", self.mode)
+        self.trim_ratio = job.get("trim_ratio", self.trim_ratio)
+
+        aggregated = self.aggregate_updates(job["updates"])
+
+        # Save aggregated result to disk
+        out_path = f"./aggregated_round_{job['round_id']}.npy"
+        np.save(out_path, aggregated)
+
+        return {
+            "round_id": job["round_id"],
+            "aggregated_uri": "file://" + os.path.abspath(out_path),
+            "num_updates": len(job["updates"]),
+            "mode": self.mode,
+        }
+
+if __name__ == "__main__":
+    import sys
+    job = json.load(sys.stdin)
+
+    agent = AggregatorAgent(
+        mode=job.get("mode", "trimmed_mean"),
+        trim_ratio=job.get("trim_ratio", 0.1),
+    )
+
+    result = agent.run_job(job)
+    print(json.dumps(result))

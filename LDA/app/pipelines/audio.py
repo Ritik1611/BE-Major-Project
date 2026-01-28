@@ -12,18 +12,12 @@ from centralized_secure_store import SecureStore
 from centralised_receipts import CentralReceiptManager
 
 
-def _extract_wav2vec2_features(wav_path: str, model_id: str, pool: str = "mean") -> Dict[str, Any]:
-    """
-    Extract wav2vec2 embeddings using HuggingFace transformers.
-    Returns mean/pooled representation.
-    """
+def _extract_wav2vec2_features(wav_path: str, model_id: str, pool: str, max_dim: int) -> Dict[str, Any]:
     try:
         from transformers import Wav2Vec2Processor, Wav2Vec2Model
     except ImportError:
-        print("⚠️ transformers not installed; skipping wav2vec2 features.")
-        return {}
+        return {"_status": "unavailable"}
 
-    print(f"🔍 Extracting wav2vec2 features from {wav_path} ...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     processor = Wav2Vec2Processor.from_pretrained(model_id)
     model = Wav2Vec2Model.from_pretrained(model_id).to(device)
@@ -31,20 +25,22 @@ def _extract_wav2vec2_features(wav_path: str, model_id: str, pool: str = "mean")
     waveform, sr = torchaudio.load(wav_path)
     if sr != 16000:
         waveform = torchaudio.functional.resample(waveform, sr, 16000)
-    input_values = processor(waveform.squeeze().numpy(), return_tensors="pt", sampling_rate=16000).input_values.to(device)
+
+    input_values = processor(
+        waveform.squeeze().numpy(),
+        return_tensors="pt",
+        sampling_rate=16000
+    ).input_values.to(device)
 
     with torch.no_grad():
-        outputs = model(input_values).last_hidden_state.cpu().numpy()
+        hidden = model(input_values).last_hidden_state.cpu().numpy()
 
-    if pool == "mean":
-        pooled = np.mean(outputs, axis=1).squeeze()
-    elif pool == "max":
-        pooled = np.max(outputs, axis=1).squeeze()
-    else:
-        pooled = outputs.squeeze()
+    pooled = np.mean(hidden, axis=1).squeeze() if pool == "mean" else hidden.squeeze()
 
-    return {"wav2vec2": pooled.tolist()}
+    if pooled.shape[0] > max_dim:
+        pooled = pooled[:max_dim]
 
+    return {"vector": pooled.tolist(), "_status": "ok"}
 
 def _extract_opensmile_features(
     wav_path: str,
@@ -128,53 +124,106 @@ def process_audio_file(
     rm = CentralReceiptManager(agent="lda-audio")
 
     features_cfg = cfg["audio_pipe"]["features"]
-    derived = {}
+
+    # ---- feature containers ----
+    derived: Dict[str, Any] = {}
+    feature_status: Dict[str, str] = {}
 
     # ---- Prosody ----
     if features_cfg.get("prosody", False):
-        derived.update(_compute_basic_prosody(audio_path))
+        try:
+            prosody = _compute_basic_prosody(audio_path)
+            derived["prosody"] = prosody
+            feature_status["prosody"] = "ok"
+        except Exception as e:
+            feature_status["prosody"] = f"failed: {type(e).__name__}"
 
     # ---- eGeMAPS (openSMILE) ----
     egemaps_cfg = features_cfg.get("egemaps", {})
     if egemaps_cfg.get("enabled", False):
-        opensmile_bin = egemaps_cfg.get("opensmile_binary")
-        opensmile_conf = egemaps_cfg.get("opensmile_config")
-        derived.update(_extract_opensmile_features(audio_path, opensmile_bin, opensmile_conf))
+        try:
+            opensmile_bin = egemaps_cfg.get("opensmile_binary")
+            opensmile_conf = egemaps_cfg.get("opensmile_config")
+            egemaps = _extract_opensmile_features(
+                audio_path,
+                opensmile_bin,
+                opensmile_conf
+            )
+            if egemaps:
+                derived["egemaps"] = egemaps
+                feature_status["egemaps"] = "ok"
+            else:
+                feature_status["egemaps"] = "unavailable"
+        except Exception as e:
+            feature_status["egemaps"] = f"failed: {type(e).__name__}"
 
     # ---- wav2vec2 ----
     wav2vec_cfg = features_cfg.get("wav2vec2", {})
     if wav2vec_cfg.get("enabled", False):
-        derived.update(
-            _extract_wav2vec2_features(
+        try:
+            max_dim = wav2vec_cfg.get("max_dim", 512)
+            w2v = _extract_wav2vec2_features(
                 audio_path,
                 model_id=wav2vec_cfg.get("model", "facebook/wav2vec2-base-960h"),
                 pool=wav2vec_cfg.get("pool", "mean"),
             )
-        )
+
+            # enforce dimensionality cap if vector exists
+            if isinstance(w2v, dict) and "wav2vec2" in w2v:
+                vec = w2v["wav2vec2"]
+                if isinstance(vec, list) and len(vec) > max_dim:
+                    vec = vec[:max_dim]
+                derived["wav2vec2"] = vec
+                feature_status["wav2vec2"] = "ok"
+            else:
+                feature_status["wav2vec2"] = "unavailable"
+
+        except Exception as e:
+            feature_status["wav2vec2"] = f"failed: {type(e).__name__}"
 
     # ---- Package + Secure Write ----
     record = {
         "session_id": session_id,
         "path": audio_path,
-        "features": {"audio": derived},
-        "derived": {"num_features": len(derived)},
+        "features": {
+            "audio": derived
+        },
+        "derived": {
+            "num_features": sum(
+                len(v) if isinstance(v, dict) else 1
+                for v in derived.values()
+            ),
+            "feature_status": feature_status,
+        },
     }
 
     fname = Path(audio_path).stem + "_audio_features.json"
-    uri = storage.encrypt_write(f"file://{storage.root / session_id / 'audio' / fname}", json.dumps(record).encode())
+    uri = storage.encrypt_write(
+        f"file://{storage.root / session_id / 'audio' / fname}",
+        json.dumps(record).encode(),
+    )
 
     receipt = rm.create_receipt(
         session_id=session_id,
         operation="audio_process",
-        params={"input": audio_path},
+        params={
+            "input": audio_path,
+            "features_requested": list(features_cfg.keys()),
+            "features_extracted": list(derived.keys()),
+        },
         outputs=[uri],
     )
+
     receipt_uri = storage.encrypt_write(
         f"file://{storage.root / session_id / 'receipts' / (Path(audio_path).stem + '_audio.json.enc')}",
         json.dumps(receipt).encode(),
     )
 
-    rows.append({"uri": uri, "receipt_uri": receipt_uri, **record})
-    print(f"✅ Audio processed and stored for {audio_path}")
+    rows.append({
+        "uri": uri,
+        "receipt_uri": receipt_uri,
+        **record
+    })
 
+    print(f"✅ Audio processed and stored for {audio_path}")
     return rows
