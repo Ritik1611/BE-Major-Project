@@ -1,0 +1,3 @@
+Explainability probe summary: n_orig=7, n_new=7, dim=6
+No linear coefficients available (non-linear probe).
+Top features by mean abs value in X_new: [4, 1, 0, 3, 2, 5]

@@ -24,6 +24,9 @@ message RoundMetadata {
   string model_version = 2;
   double epsilon_max = 3;
   string upload_uri = 4;
+  string state = 5;   
+  uint32 num_updates = 6;
+  string aggregation_mode = 7;
 }
 
 message Receipt {
@@ -32,6 +35,10 @@ message Receipt {
   bytes payload_hash = 3;
   double epsilon_spent = 4;
   bytes signature = 5;
+
+  string enc_uri = 6;
+  string scheme = 7;
+  string nonce = 8;   
 }
 
 message Ack {

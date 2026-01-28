@@ -63,14 +63,23 @@ class MultiModalDataset(Dataset):
 
     def _extract_audio_vec(self, r):
         feats = r.get("features") or {}
-        audio = None
-        if isinstance(feats, dict) and "audio" in feats:
-            a = feats["audio"]
-            if isinstance(a, dict) and a.get("wav2vec2"):
-                return torch.tensor(a["wav2vec2"], dtype=torch.float32)
-            if isinstance(a, dict) and a.get("egemaps"):
-                vals = [float(a["egemaps"][k]) for k in sorted(a["egemaps"].keys())]
-                return torch.tensor(vals, dtype=torch.float32)
+        audio = feats.get("audio")
+        if not isinstance(audio, dict):
+            return None
+
+        # 1) Prefer wav2vec2 embeddings if present
+        if isinstance(audio.get("wav2vec2"), list):
+            return torch.tensor(audio["wav2vec2"], dtype=torch.float32)
+
+        # 2) Fallback: use all numeric audio features
+        numeric_vals = []
+        for k, v in audio.items():
+            if isinstance(v, (int, float)):
+                numeric_vals.append(float(v))
+
+        if numeric_vals:
+            return torch.tensor(numeric_vals, dtype=torch.float32)
+
         return None
 
     def _extract_video_vec(self, r):
@@ -223,6 +232,8 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(path)
+
+    # -------- Load records --------
     if p.suffix == ".parquet":
         table = pq.read_table(str(p))
         df = table.to_pandas()
@@ -240,16 +251,34 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
         df = pd.read_csv(str(p))
         records = df.to_dict(orient="records")
 
-    # attempt parse JSON strings
+    # -------- Parse embedded JSON fields --------
     for r in records:
         for key in ("features", "derived"):
             if key in r and isinstance(r[key], str):
                 try:
                     r[key] = json.loads(r[key])
-                except:
+                except Exception:
                     pass
-    return records
 
+    # -------- FILTER BAD TRANSCRIPTS (CRITICAL FIX) --------
+    filtered: List[Dict[str, Any]] = []
+    for r in records:
+        derived = r.get("derived") or {}
+        status = derived.get("transcript_status", "ok")
+
+        # Drop rows with failed or missing ASR
+        if status in ("failed", "missing"):
+            continue
+
+        filtered.append(r)
+
+    if not filtered:
+        raise RuntimeError(
+            "All records were filtered out due to missing/failed transcripts. "
+            "Trainer cannot proceed."
+        )
+
+    return filtered
 
 def collate_batch(batch):
     input_ids = torch.stack([b["input_ids"] for b in batch], dim=0)
@@ -558,7 +587,13 @@ def save_encrypted_delta(delta_state: Dict[str, torch.Tensor], store: SecureStor
     payload = buf.getvalue()
     rel = f"{session_id}/local_updates/{os.urandom(8).hex()}.pt.enc"
     uri = store.encrypt_write(f"file://{store.root / rel}", payload)
-    receipt = rm.create_receipt(agent="trainer-agent", session_id=session_id, operation="local_update", params={"size_bytes": len(payload)}, outputs=[uri])
+    receipt = rm.create_receipt(
+        agent="trainer-agent",
+        operation="local_update",
+        params={"size_bytes": len(payload)},
+        outputs=[uri],
+        session_id=session_id,
+    )
     rrel = f"{session_id}/receipts/trainer_update_{os.urandom(6).hex()}.json.enc"
     ruri = store.encrypt_write(f"file://{store.root / rrel}", json.dumps(receipt).encode())
     return uri, ruri
@@ -640,7 +675,19 @@ def physician_feedback_cli(preds: List[Dict[str, Any]], texts: List[str]) -> Lis
 
 
 # ---------- Orchestrator ----------
-def orchestrate(input_path: str, mode: str = "autonomous", device: str = DEFAULT_DEVICE, epochs: int = 1, batch_size: int = 8, lr: float = 2e-5, rl_supervised_lambda: float = 0.0, max_samples: Optional[int] = None, safety_params: Dict[str, float] = None, **kwargs):
+def orchestrate(
+    input_path: str,
+    session_id: str,
+    mode: str = "autonomous",
+    device: str = DEFAULT_DEVICE,
+    epochs: int = 1,
+    batch_size: int = 8,
+    lr: float = 2e-5,
+    rl_supervised_lambda: float = 0.0,
+    max_samples: Optional[int] = None,
+    safety_params: Dict[str, float] = None,
+    **kwargs
+):
     rag_k = kwargs.get("rag_k", None)
     rag_mode = kwargs.get("rag_mode", None)
     records = read_parquet_records(input_path)
@@ -655,14 +702,18 @@ def orchestrate(input_path: str, mode: str = "autonomous", device: str = DEFAULT
     vision_dim = None
     for r in records:
         f = r.get("features") or {}
-        if isinstance(f, dict) and "audio" in f:
-            a = f["audio"]
-            if isinstance(a, dict) and a.get("wav2vec2"):
-                audio_dim = len(a["wav2vec2"])
-                break
-            if isinstance(a, dict) and a.get("egemaps"):
-                audio_dim = len(a["egemaps"].keys())
-                break
+        audio = f.get("audio")
+        if not isinstance(audio, dict):
+            continue
+
+        if isinstance(audio.get("wav2vec2"), list):
+            audio_dim = len(audio["wav2vec2"])
+            break
+
+        numeric_vals = [v for v in audio.values() if isinstance(v, (int, float))]
+        if numeric_vals:
+            audio_dim = len(numeric_vals)
+            break
     for r in records:
         f = r.get("features") or {}
         if isinstance(f, dict) and "video" in f and isinstance(f["video"], dict) and f["video"].get("densenet"):
@@ -688,9 +739,11 @@ def orchestrate(input_path: str, mode: str = "autonomous", device: str = DEFAULT
         r["_pred_class_probs"] = p["pred_class_probs"]
 
     # secure store + receipts
-    store = SecureStore(agent="trainer-agent", root=str(LOCAL_SAVE_DIR / "secure_store"))
+    store = SecureStore(
+        agent="trainer-agent",
+        root=LOCAL_SAVE_DIR / "secure_store"
+    )
     rm = CentralReceiptManager(agent="trainer-agent")
-    session_id = f"trainer-sess-{int(time.time())}"
 
     if mode == "autonomous":
         # cheap explainability on first batch
@@ -702,7 +755,13 @@ def orchestrate(input_path: str, mode: str = "autonomous", device: str = DEFAULT
         payload = json.dumps({"preds": preds, "explainability": explanations}, default=float).encode()
         out_rel = f"{session_id}/inference/results_{os.urandom(6).hex()}.json.enc"
         out_uri = store.encrypt_write(f"file://{store.root / out_rel}", payload)
-        receipt = rm.create_receipt(agent="trainer-agent", session_id=session_id, operation="inference", params={"count": len(preds)}, outputs=[out_uri])
+        receipt = rm.create_receipt(
+            agent="trainer-agent",
+            operation="inference",
+            params={"count": len(preds)},
+            outputs=[out_uri],
+            session_id=session_id,
+        )
         rrel = f"{session_id}/receipts/inference_{os.urandom(6).hex()}.json.enc"
         ruri = store.encrypt_write(f"file://{store.root / rrel}", json.dumps(receipt).encode())
         print(f"[done] inference -> {out_uri} (receipt {ruri})")
@@ -774,12 +833,22 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-param-change", type=float, default=DEFAULT_MAX_PARAM_CHANGE)
     parser.add_argument("--max-global-delta-norm", type=float, default=DEFAULT_MAX_GLOBAL_DELTA_NORM)
+    parser.add_argument("--session-id", required=True)
     args = parser.parse_args()
 
     safety = {"max_param_change": args.max_param_change, "max_global_norm": args.max_global_delta_norm}
-    res = orchestrate(input_path=args.input, mode=args.mode, device=args.device, epochs=args.epochs,
-                      batch_size=args.batch_size, lr=args.lr, rl_supervised_lambda=args.rl_supervised_lambda,
-                      max_samples=args.max_samples, safety_params=safety)
+    res = orchestrate(
+        input_path=args.input,
+        session_id=args.session_id,
+        mode=args.mode,
+        device=args.device,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        rl_supervised_lambda=args.rl_supervised_lambda,
+        max_samples=args.max_samples,
+        safety_params=safety
+    )
     print(json.dumps(res, indent=2, default=str))
 
 
