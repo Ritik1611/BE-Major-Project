@@ -71,7 +71,16 @@ class SecureStore:
         p = Path(uri[len("file://"):])
         p.parent.mkdir(parents=True, exist_ok=True)
 
-        key = self._derive_key(str(p.parent))
+        context_path = Path(p.parent).resolve()
+        root_path = self.root.resolve()
+
+        try:
+            context = str(context_path.relative_to(root_path))
+        except ValueError:
+            # fallback safety (should never happen)
+            context = str(context_path)
+
+        key = self._derive_key(context)
         aesgcm = AESGCM(key)
         nonce = os.urandom(12)
         ct = aesgcm.encrypt(nonce, data, None)
@@ -87,10 +96,19 @@ class SecureStore:
     def decrypt_read(self, uri: str) -> bytes:
         assert uri.startswith("file://"), "URI must start with file://"
         p = Path(uri[len("file://"):])
+
         payload = json.loads(p.read_text())
         nonce = base64.b64decode(payload["nonce"])
         ct = base64.b64decode(payload["ct"])
 
-        key = self._derive_key(str(p.parent))
+        context_path = p.parent.resolve()
+        root_path = self.root.resolve()
+
+        try:
+            context = str(context_path.relative_to(root_path))
+        except ValueError:
+            context = str(context_path)
+
+        key = self._derive_key(context)
         aesgcm = AESGCM(key)
         return aesgcm.decrypt(nonce, ct, None)

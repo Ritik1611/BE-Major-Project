@@ -110,6 +110,7 @@ class DPAgent:
         local_update_uri: str,
         session_id: str,
         parent_receipt_uri: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         """
         local_update_uri: 'file://<path>'
@@ -127,14 +128,20 @@ class DPAgent:
         try:
             decrypted = self.store.decrypt_read("file://" + path)
         except Exception as e:
-            print(f"[WARN] File not encrypted or decrypt failed ({e}); reading raw bytes.")
-            with open(path, "rb") as f:
-                decrypted = f.read()
+            raise RuntimeError(
+                f"[DPAgent] Failed to decrypt local update. "
+                f"This indicates a SecureStore key/root mismatch.\n"
+                f"Path: {path}\nError: {e}"
+            )
 
         # Load model state dict from bytes
         buf = io.BytesIO(decrypted)
         try:
-            state_dict = torch.load(buf, map_location="cpu")
+            state_dict = torch.load(
+                buf,
+                map_location="cpu",
+                weights_only=False,   # 🔥 REQUIRED for PyTorch ≥ 2.6
+            )
         except Exception as e:
             raise RuntimeError(f"[ERROR] Failed to load model state_dict from {path}: {e}")
 
@@ -166,6 +173,7 @@ class DPAgent:
 
         # Create centralized receipt
         receipt = self.rm.create_receipt(
+            agent="dp-agent",
             session_id=session_id,
             operation="dp_process_update",
             params={
@@ -175,9 +183,9 @@ class DPAgent:
                 "mechanism": self.mechanism,
                 "l2_norm_before": l2_before,
                 "l2_norm_after": l2_after,
+                "parent_receipt": parent_receipt_uri,  # stored as metadata, not linkage
             },
             outputs=["file://" + out_path],
-            parents=[parent_receipt_uri] if parent_receipt_uri else None,
         )
 
         receipt_uri = self.rm.write_receipt(receipt, out_dir=self.receipts_dir)

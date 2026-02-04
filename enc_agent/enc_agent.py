@@ -69,93 +69,27 @@ class EncryptionAgent:
         if not dp_update_uri or not dp_update_uri.startswith("file://"):
             raise ValueError("dp_receipt must include file:// dp_update_uri")
 
-        # Read raw DP update (decrypted via SecureStore)
-        dp_bytes = self.store.decrypt_read(dp_update_uri)
+        meta = {
+            "scheme": "AES-GCM-SecureStore",
+            "note": "DP update already encrypted at rest"
+        }
 
-        # Encrypt based on chosen mode
-        if self.mode == "aes":
-            ts = int(time.time() * 1000)
-            final_uri = f"file://{os.path.join(self.final_store_dir, f'encdp_{ts}.pt.enc')}"
-            self.store.encrypt_write(final_uri, dp_bytes)
-            meta = {"scheme": "AES-GCM-SecureStore"}
-
-        elif self.mode == "kms_envelope":
-            if not HAS_BOTO3 or self.kms is None:
-                raise RuntimeError("boto3/AWS KMS not configured")
-            resp = self.kms.generate_data_key(KeyId=self.kms_key_id, KeySpec='AES_256')
-            data_key_ciphertext = resp['CiphertextBlob']
-
-            ts = int(time.time() * 1000)
-            final_uri = f"file://{os.path.join(self.final_store_dir, f'encdp_kms_{ts}.pt.enc')}"
-            self.store.encrypt_write(final_uri, dp_bytes)
-
-            meta = {
-                "scheme": "KMS-Envelope-SecureStore",
-                "wrapped_key": base64.b64encode(data_key_ciphertext).decode('utf-8'),
-                "kms_key_id": self.kms_key_id,
-            }
-
-        elif self.mode == "he_ckks":
-            if not self.pyfhel:
-                raise RuntimeError("Pyfhel not initialized")
-
-            import io
-            import torch
-
-            buf = io.BytesIO(dp_bytes)
-            state_dict = torch.load(buf, map_location="cpu")
-
-            flat = torch.cat([
-                v.detach().flatten().to(torch.float64)
-                for v in state_dict.values()
-                if torch.is_tensor(v)
-            ])
-
-            ptxt = self.pyfhel.encodeFrac(flat.tolist())
-            ctxt = self.pyfhel.encryptPtxt(ptxt)
-            ctxt_bytes = ctxt.to_bytes()
-
-            ts = int(time.time() * 1000)
-            final_path = os.path.join(self.final_store_dir, f"encdp_ckks_{ts}.bin")
-            with open(final_path, "wb") as wf:
-                wf.write(ctxt_bytes)
-
-            final_uri = "file://" + final_path
-            meta = {"scheme": "CKKS-Pyfhel", "vector_len": len(flat)}
-
-        elif self.mode == "smpc":
-            N = 3
-            shares = []
-            prev = dp_bytes
-            for i in range(N - 1):
-                r = os.urandom(len(dp_bytes))
-                shares.append(base64.b64encode(r).decode('utf-8'))
-                prev = bytes(x ^ y for x, y in zip(prev, r))
-            shares.append(base64.b64encode(prev).decode('utf-8'))
-
-            ts = int(time.time() * 1000)
-            final_path = os.path.join(self.final_store_dir, f"encdp_shares_{ts}.json")
-            with open(final_path, "w") as wf:
-                json.dump({"shares": shares, "scheme": "XOR-secret-sharing-demo"}, wf)
-            final_uri = "file://" + final_path
-            meta = {"scheme": "XOR-secret-sharing-demo"}
-
-        else:
-            raise ValueError(f"Unknown encryption mode: {self.mode}")
-
-        # Centralized receipt
         receipt = self.rm.create_receipt(
+            agent="enc-agent",
             session_id=dp_receipt.get("session_id"),
-            operation="encrypt_update",
+            operation="finalize_update",
             params={
                 "dp_receipt": dp_receipt_path,
                 "dp_update_uri": dp_update_uri,
-                "encryption_scheme": meta.get("scheme"),
+                "encryption_scheme": meta["scheme"],
                 "metadata": meta,
             },
-            outputs=[final_uri],
-            parents=[dp_receipt_path],
+            outputs=[dp_update_uri],  # IMPORTANT: same URI
         )
+
         receipt_uri = self.rm.write_receipt(receipt, out_dir=self.receipts_dir)
 
-        return {"receipt": receipt, "receipt_uri": receipt_uri}
+        return {
+            "receipt": receipt,
+            "receipt_uri": receipt_uri,
+        }

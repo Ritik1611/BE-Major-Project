@@ -685,7 +685,10 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
     rows: List[Dict[str, Any]] = []
 
     # create secure store
-    store = SecureStore(cfg["storage"]["root"])
+    store = SecureStore(
+        agent="lda-session-processor",
+        root=Path(cfg["storage"]["root"]).resolve()
+    )
     # centralized receipt manager
     receipt_mgr = CentralReceiptManager(agent="lda-session-processor")
 

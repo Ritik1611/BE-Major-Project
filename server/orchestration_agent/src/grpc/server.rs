@@ -56,7 +56,7 @@ impl Orchestrator for Service {
         let pubkey = req.into_inner().device_pubkey;
         let device_id = derive_device_id(&pubkey);
 
-        self.state.devices.insert(device_id, ());
+        self.state.devices.insert(device_id, pubkey.clone());
 
         Ok(Response::new(Certificate { pem: pubkey }))
     }
@@ -103,19 +103,20 @@ impl Orchestrator for Service {
 
         let receipt = req.into_inner();
 
-        // 1. Device must be registered
-        let known = self.state.devices.iter().any(|entry| {
-            ct_eq(entry.key(), &receipt.device_id)
-        });
-
-        if !known {
-            return Err(Status::permission_denied("unknown device"));
-        }
-
         // 2. Verify receipt signature
+        let pubkey = self.state.devices
+            .get(&receipt.device_id)
+            .ok_or_else(|| Status::permission_denied("unknown device"))?
+            .clone();
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&receipt.device_id);
+        msg.extend_from_slice(&receipt.round_id.to_be_bytes());
+        msg.extend_from_slice(&receipt.payload_hash);
+
         crate::receipts::verify(
-            &receipt.device_id,
-            &receipt.payload_hash,
+            &pubkey,
+            &msg,
             &receipt.signature,
         )
         .map_err(|_| Status::permission_denied("invalid receipt signature"))?;
@@ -186,8 +187,13 @@ pub async fn serve(
         .identity(server_identity)
         .client_ca_root(client_ca);
 
-    Server::builder()
-        // .tls_config(tls)?
+    let mut builder = Server::builder();
+
+    if cfg.server.enable_tls {
+        builder = builder.tls_config(tls)?;
+    }
+
+    builder
         .add_service(OrchestratorServer::new(svc))
         .serve(cfg.server.addr.parse()?)
         .await?;
