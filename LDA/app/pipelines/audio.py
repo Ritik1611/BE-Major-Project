@@ -120,7 +120,10 @@ def process_audio_file(
     print(f"🎧 Processing audio: {audio_path}")
     rows = []
 
-    storage = SecureStore(agent="lda-audio", root=cfg["storage"]["root"])
+    storage = SecureStore(
+        agent="lda-audio",
+        root=Path(cfg["storage"]["root"]).resolve()
+    )
     rm = CentralReceiptManager(agent="lda-audio")
 
     features_cfg = cfg["audio_pipe"]["features"]

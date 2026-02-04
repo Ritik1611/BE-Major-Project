@@ -234,7 +234,32 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
         raise FileNotFoundError(path)
 
     # -------- Load records --------
-    if p.suffix == ".parquet":
+    if p.suffix == ".jsonl":
+        rows = []
+        store = SecureStore(agent="lda-session-processor", root=Path("/home/ritik26/Desktop/BE-Major-Project/secure_store").resolve())
+
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                m = json.loads(line)
+
+                enc_uri = m["uri"]
+                row_idx = m["row"]
+
+                # decrypt parquet
+                parquet_bytes = store.decrypt_read(enc_uri)
+
+                with tempfile.NamedTemporaryFile(suffix=".parquet") as tf:
+                    tf.write(parquet_bytes)
+                    tf.flush()
+
+                    table = pq.read_table(tf.name)
+                    df = table.to_pandas()
+                    rows.append(df.iloc[row_idx].to_dict())
+
+        records = rows
+    elif p.suffix == ".parquet":
         table = pq.read_table(str(p))
         df = table.to_pandas()
         records = df.to_dict(orient="records")
@@ -690,7 +715,26 @@ def orchestrate(
 ):
     rag_k = kwargs.get("rag_k", None)
     rag_mode = kwargs.get("rag_mode", None)
-    records = read_parquet_records(input_path)
+
+    if input_path.startswith("file://") and input_path.endswith(".enc"):
+        # IMPORTANT: must use SAME root as LDA
+        SECURE_ROOT = Path("/home/ritik26/Desktop/BE-Major-Project/secure_store")
+
+        store = SecureStore(
+            agent="lda-session-processor",
+            root=SECURE_ROOT  # must match LDA cfg["storage"]["root"]
+        )
+
+        manifest_bytes = store.decrypt_read(input_path)
+
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as tf:
+            tf.write(manifest_bytes)
+            local_manifest_path = tf.name
+
+        records = read_parquet_records(local_manifest_path)
+    else:
+        records = read_parquet_records(input_path)
+
     if max_samples:
         records = records[:max_samples]
     print(f"[info] loaded {len(records)} records")

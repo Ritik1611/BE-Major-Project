@@ -5,7 +5,7 @@ use crate::round::{Round, RoundState};
 pub type DeviceId = Vec<u8>;
 
 pub struct OrchestratorState {
-    pub devices: DashMap<DeviceId, ()>,
+    pub devices: DashMap<DeviceId, Vec<u8>>, // device_id -> pubkey
     pub rounds: DashMap<u64, Round>,
 }
 
