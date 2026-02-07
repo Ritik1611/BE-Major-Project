@@ -13,6 +13,12 @@ from security.anti_debug import anti_debug
 from security.integrity import write_baseline
 from security.tpm_attestation import provision_tpm_identity, get_device_pubkey
 from security.tpm_seal import seal_master_secret
+from security.deps_windows import verify_windows_deps
+from security.deps_windows import verify_python_and_pip
+from fs.install_python_deps import install_python_deps
+from fs.install_openface import install_openface
+from fs.install_opensmile import install_opensmile
+
 
 from runtime.grpc.orchestrator_pb2_grpc import OrchestratorStub
 from runtime.grpc.orchestrator_pb2 import EnrollRequest
@@ -24,7 +30,7 @@ STATE_FILE = BASE_DIR / "state" / "install_state.json"
 KEYS_DIR = BASE_DIR / "keys"
 
 SERVER_ADDR = "SERVER_IP:50051"
-
+INSTALLER_OTP = None
 
 def write_install_state():
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -37,7 +43,13 @@ def write_install_state():
 
 
 def otp_enrollment(device_pubkey: bytes):
-    token = input("Enter enrollment OTP: ").strip()
+    global INSTALLER_OTP
+
+    if INSTALLER_OTP:
+        token = INSTALLER_OTP
+    else:
+        token = input("Enter enrollment OTP: ").strip()
+
     if len(token) < 6:
         sys.exit("[SECURITY] Invalid OTP")
 
@@ -85,8 +97,26 @@ def main():
     print("[7] Integrity baseline")
     write_baseline()
 
+    verify_windows_deps()
+
+    if IS_WINDOWS:
+        from security.windows_runtime import check_vc_runtime
+        check_vc_runtime()
+
     print("[8] Install runtime payload")
     install_runtime()
+
+    print("[STEP 11] Verifying Python")
+    verify_python_and_pip()
+
+    print("[STEP 12] Installing Python packages")
+    install_python_deps()
+
+    print("[STEP 13] Installing OpenFace")
+    install_openface()
+
+    print("[STEP 14] Installing openSMILE")
+    install_opensmile()
 
     print("[9] Persist install state")
     write_install_state()

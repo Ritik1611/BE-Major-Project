@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from . import orchestrator_pb2 as orchestrator__pb2
+import orchestrator_pb2 as orchestrator__pb2
 
 
 class OrchestratorStub(object):
@@ -29,6 +29,11 @@ class OrchestratorStub(object):
                 request_serializer=orchestrator__pb2.Receipt.SerializeToString,
                 response_deserializer=orchestrator__pb2.Ack.FromString,
                 )
+        self.EnrollDevice = channel.unary_unary(
+                '/orchestrator.Orchestrator/EnrollDevice',
+                request_serializer=orchestrator__pb2.EnrollRequest.SerializeToString,
+                response_deserializer=orchestrator__pb2.EnrollResponse.FromString,
+                )
 
 
 class OrchestratorServicer(object):
@@ -52,6 +57,13 @@ class OrchestratorServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def EnrollDevice(self, request, context):
+        """✅ Enrollment RPC MUST be inside service
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_OrchestratorServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -69,6 +81,11 @@ def add_OrchestratorServicer_to_server(servicer, server):
                     servicer.SubmitReceipt,
                     request_deserializer=orchestrator__pb2.Receipt.FromString,
                     response_serializer=orchestrator__pb2.Ack.SerializeToString,
+            ),
+            'EnrollDevice': grpc.unary_unary_rpc_method_handler(
+                    servicer.EnrollDevice,
+                    request_deserializer=orchestrator__pb2.EnrollRequest.FromString,
+                    response_serializer=orchestrator__pb2.EnrollResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -128,5 +145,22 @@ class Orchestrator(object):
         return grpc.experimental.unary_unary(request, target, '/orchestrator.Orchestrator/SubmitReceipt',
             orchestrator__pb2.Receipt.SerializeToString,
             orchestrator__pb2.Ack.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def EnrollDevice(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/orchestrator.Orchestrator/EnrollDevice',
+            orchestrator__pb2.EnrollRequest.SerializeToString,
+            orchestrator__pb2.EnrollResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

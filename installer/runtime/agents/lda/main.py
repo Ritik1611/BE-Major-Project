@@ -27,12 +27,25 @@ class PreprocessRequest(BaseModel):
     inputs: Dict[str, str]
     config_uri: str
 
-
 def _load_config(uri: str) -> dict:
     assert uri.startswith("file://"), "Only file:// URIs are supported for config"
-    p = Path(uri[len("file://"):])
+    p = Path(uri[len("file://"):]).expanduser().resolve()
+
     with open(p, "r") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    def _expand(obj):
+        if isinstance(obj, dict):
+            return {k: _expand(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_expand(v) for v in obj]
+        if isinstance(obj, str):
+            if obj.startswith("~"):
+                return str(Path(obj).expanduser().resolve())
+            return obj
+        return obj
+
+    return _expand(cfg)
 
 
 def _write_parquet_encrypted(

@@ -1,5 +1,3 @@
-# installer/runtime/grpc_client.py
-
 import grpc
 from pathlib import Path
 from runtime.tpm_guard import sign_message
@@ -17,10 +15,10 @@ def create_grpc_stub(server_addr: str):
         channel = grpc.secure_channel(server_addr, creds)
         stub = OrchestratorStub(channel)
 
-        # Attach TPM-backed signer
+        # Attach TPM-backed signer dynamically
         stub.sign_message = sign_message
 
         return stub
 
-    except Exception:
-        trigger_self_destruct("Secure gRPC channel setup failed")
+    except Exception as e:
+        trigger_self_destruct(f"Secure gRPC channel setup failed: {e}")
