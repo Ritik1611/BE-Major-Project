@@ -13,8 +13,8 @@ ingest:
       openface:
         enabled: true
         features: ["AUs", "gaze", "pose", "blink"]
-        binary_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
-        haar_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
+        binary_path: "~/.federated/deps/windows/OpenFace/FeatureExtraction.exe"
+        haar_path: "~/.federated/deps/windows/OpenFace/classifiers/haarcascade_frontalface_alt.xml"
     persist_clips: true
 
   audio:
@@ -30,8 +30,8 @@ ingest:
         prosody: true
         egemaps:
           enabled: true
-          opensmile_binary: "/home/ritik26/Desktop/BE-Major-Project/LDA/opensmile/build/SMILExtract"
-          opensmile_config: "/home/ritik26/Desktop/BE-Major-Project/LDA/opensmile/config/egemaps/v02/eGeMAPSv02.conf"
+          opensmile_binary: "~/.federated/deps/windows/opensmile/build/progsrc/smilextract/Release/SMILExtract.exe"
+          opensmile_config: "~/.federated/deps/windows/opensmile/config/egemaps/v02/eGeMAPSv02.conf"
         wav2vec2:
           enabled: true
           model: "facebook/wav2vec2-base-960h"
@@ -68,8 +68,8 @@ video_pipe:
   openface:
     enabled: true
     features: ["AUs", "gaze", "pose", "blink"]
-    binary_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/FeatureExtraction"
-    haar_path: "/home/ritik26/Desktop/BE-Major-Project/LDA/OpenFace/build/bin/classifiers/haarcascade_frontalface_alt.xml"
+    binary_path: "~/.federated/deps/windows/OpenFace/FeatureExtraction.exe"
+    haar_path: "~/.federated/deps/windows/OpenFace/classifiers/haarcascade_frontalface_alt.xml"
 
 audio_pipe:
   vad: "webrtc"
@@ -78,8 +78,8 @@ audio_pipe:
     prosody: true
     egemaps:
       enabled: true
-      opensmile_binary: "/home/ritik26/Desktop/BE-Major-Project/LDA/opensmile/build/SMILExtract"
-      opensmile_config: "/home/ritik26/Desktop/BE-Major-Project/LDA/opensmile/config/egemaps/v02/eGeMAPSv02.conf"
+      opensmile_binary: "~/.federated/deps/windows/opensmile/build/progsrc/smilextract/Release/SMILExtract.exe"
+      opensmile_config: "~/.federated/deps/windows/opensmile/config/egemaps/v02/eGeMAPSv02.conf"
     wav2vec2:
       enabled: true
       model: "facebook/wav2vec2-base-960h"

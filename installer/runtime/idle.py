@@ -1,9 +1,18 @@
 import subprocess
 import time
+import platform
 
 IDLE_THRESHOLD_SECONDS = 300  # 5 minutes
 
+
 def is_system_idle() -> bool:
+    system = platform.system().lower()
+
+    # ✅ Windows: no idle blocking
+    if system == "windows":
+        return True
+
+    # ✅ Linux: xprintidle
     try:
         output = subprocess.check_output(
             ["xprintidle"], stderr=subprocess.DEVNULL
