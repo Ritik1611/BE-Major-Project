@@ -41,3 +41,6 @@ configs/local_config.yaml
 Thumbs.db
 
 installer/runtime/deps/windows/*
+installer/FederatedInstaller.spec
+installer/build/
+installer/dist/
