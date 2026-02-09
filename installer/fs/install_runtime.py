@@ -2,10 +2,26 @@ import shutil
 import stat
 import platform
 from pathlib import Path
+import sys
 from runtime.validate_deps import main as validate_deps
 
 BASE_DIR = Path.home() / ".federated"
-INSTALLER_ROOT = Path(__file__).resolve().parents[1]
+
+def get_installer_root() -> Path:
+    """
+    Returns the root directory of the installer.
+    Works for:
+    - normal python execution
+    - PyInstaller --onefile execution
+    """
+    if getattr(sys, 'frozen', False):
+        # PyInstaller onefile mode
+        return Path(sys._MEIPASS)
+    else:
+        # Normal python execution
+        return Path(__file__).resolve().parents[1]
+
+INSTALLER_ROOT = get_installer_root()
 RUNTIME_SRC = INSTALLER_ROOT / "runtime"
 
 

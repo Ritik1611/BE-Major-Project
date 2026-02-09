@@ -6,8 +6,13 @@ from pathlib import Path
 BASE = Path.home() / ".federated"
 DST = BASE / "deps" / "OpenFace"
 
-INSTALLER_ROOT = Path(__file__).resolve().parents[1]
-SRC = INSTALLER_ROOT / "runtime" / "deps" / "windows" / "OpenFace"
+def get_installer_root() -> Path:
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parents[1]
+
+INSTALLER_ROOT = get_installer_root()
+SRC = INSTALLER_ROOT / "runtime" / "deps" / "windows" / "opensmile"
 
 def install_openface():
     if DST.exists():
