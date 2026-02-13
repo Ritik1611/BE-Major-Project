@@ -46,3 +46,9 @@ installer/build/
 installer/dist/
 
 data/*
+dementia/
+LDA/OpenFace/
+LDA/opensmile/
+.environments
+plots/
+LDA/app/pipelines/.env
