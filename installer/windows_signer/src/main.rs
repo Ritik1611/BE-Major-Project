@@ -4,8 +4,6 @@ use windows::Win32::Security::Cryptography::*;
 use windows::Win32::Foundation::*;
 use sha2::{Sha256, Digest};
 
-const KEY_NAME: &str = "FederatedDeviceKey";
-
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -33,7 +31,7 @@ fn open_or_create_key() -> Result<NCRYPT_KEY_HANDLE> {
         let status = NCryptOpenKey(
             provider,
             &mut key,
-            PCWSTR::from_raw(w!(KEY_NAME).as_ptr()),
+            PCWSTR::from_raw(w!("FederatedDeviceKey").as_ptr()),
             0,
             0,
         );
@@ -44,7 +42,7 @@ fn open_or_create_key() -> Result<NCRYPT_KEY_HANDLE> {
                 provider,
                 &mut key,
                 w!("ECDSA_P256"),
-                PCWSTR::from_raw(w!(KEY_NAME).as_ptr()),
+                PCWSTR::from_raw(w!("FederatedDeviceKey").as_ptr()),
                 0,
                 NCRYPT_MACHINE_KEY_FLAG,
             )?;
