@@ -1,4 +1,5 @@
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use p256::ecdsa::{VerifyingKey, Signature, signature::Verifier};
+use sha2::{Sha256, Digest};
 use crate::errors::OrchestratorError;
 
 pub fn verify(
@@ -7,20 +8,11 @@ pub fn verify(
     sig: &[u8],
 ) -> Result<(), OrchestratorError> {
 
-    // Enforce exact public key size (Ed25519 = 32 bytes)
-    let pubkey: [u8; 32] = device_pubkey
-        .try_into()
+    let verifying_key = VerifyingKey::from_sec1_bytes(device_pubkey)
         .map_err(|_| OrchestratorError::InvalidIdentity)?;
 
-    // Enforce exact signature size (Ed25519 = 64 bytes)
-    let signature_bytes: [u8; 64] = sig
-        .try_into()
+    let signature = Signature::from_der(sig)
         .map_err(|_| OrchestratorError::CryptoError)?;
-
-    let verifying_key = VerifyingKey::from_bytes(&pubkey)
-        .map_err(|_| OrchestratorError::CryptoError)?;
-
-    let signature = Signature::from_bytes(&signature_bytes);
 
     verifying_key
         .verify(msg, &signature)

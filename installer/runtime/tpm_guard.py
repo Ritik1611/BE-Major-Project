@@ -22,7 +22,7 @@ def sign_message(message: bytes) -> bytes:
                 "tpm2_sign",
                 "-c", str(Path.home() / ".federated/tpm/device.ctx"),
                 "-g", "sha256",
-                "-m", "-",
+                "-s", "ecdsa",
                 "-o", "-"
             ],
             input=message,

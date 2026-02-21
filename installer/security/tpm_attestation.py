@@ -102,18 +102,20 @@ def provision_tpm_identity():
         return
 
     print("[TPM] Creating primary key")
+    # Create ECC primary key
     _run([
         "tpm2_createprimary",
         "-C", "o",
-        "-G", "rsa",
+        "-G", "ecc",
         "-c", str(PRIMARY_CTX)
     ])
 
-    print("[TPM] Creating device signing key")
+    # Create ECC signing key (P-256)
     _run([
         "tpm2_create",
         "-C", str(PRIMARY_CTX),
-        "-G", "rsa",
+        "-G", "ecc",
+        "-g", "sha256",
         "-u", str(TPM_DIR / "device.pub"),
         "-r", str(TPM_DIR / "device.priv"),
         "-a", "sign|fixedtpm|fixedparent|sensitivedataorigin|userwithauth"
