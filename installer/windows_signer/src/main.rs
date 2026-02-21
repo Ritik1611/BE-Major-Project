@@ -1,7 +1,6 @@
 use std::io::{Read, Write};
 use windows::core::*;
 use windows::Win32::Security::Cryptography::*;
-use windows::Win32::Foundation::*;
 use sha2::{Sha256, Digest};
 
 fn main() -> Result<()> {
@@ -28,26 +27,25 @@ fn open_or_create_key() -> Result<NCRYPT_KEY_HANDLE> {
 
         let mut key = NCRYPT_KEY_HANDLE::default();
 
-        let status = NCryptOpenKey(
+        let open_result = NCryptOpenKey(
             provider,
             &mut key,
-            PCWSTR::from_raw(w!("FederatedDeviceKey").as_ptr()),
-            0,
-            0,
+            w!("FederatedDeviceKey"),
+            CERT_KEY_SPEC(0),
+            NCRYPT_FLAGS(0),
         );
 
-        if status.is_err() {
-            // Create new ECC P-256 key
+        if open_result.is_err() {
             NCryptCreatePersistedKey(
                 provider,
                 &mut key,
                 w!("ECDSA_P256"),
-                PCWSTR::from_raw(w!("FederatedDeviceKey").as_ptr()),
-                0,
+                w!("FederatedDeviceKey"),
+                CERT_KEY_SPEC(0),
                 NCRYPT_MACHINE_KEY_FLAG,
             )?;
 
-            NCryptFinalizeKey(key, 0)?;
+            NCryptFinalizeKey(key, NCRYPT_FLAGS(0))?;
         }
 
         Ok(key)
@@ -70,10 +68,10 @@ fn sign_stdin() -> Result<()> {
         NCryptSignHash(
             key,
             None,
-            Some(digest.as_slice()),
+            &digest,
             None,
             &mut sig_len,
-            0,
+            NCRYPT_FLAGS(0),
         )?;
 
         let mut signature = vec![0u8; sig_len as usize];
@@ -81,10 +79,10 @@ fn sign_stdin() -> Result<()> {
         NCryptSignHash(
             key,
             None,
-            Some(digest.as_slice()),
-            Some(signature.as_mut_slice()),
+            &digest,
+            Some(&mut signature),
             &mut sig_len,
-            0,
+            NCRYPT_FLAGS(0),
         )?;
 
         std::io::stdout().write_all(&signature)?;
@@ -105,9 +103,8 @@ fn export_public_key() -> Result<()> {
             w!("PUBLICBLOB"),
             None,
             None,
-            0,
             &mut len,
-            0,
+            NCRYPT_FLAGS(0),
         )?;
 
         let mut buf = vec![0u8; len as usize];
@@ -117,14 +114,12 @@ fn export_public_key() -> Result<()> {
             None,
             w!("PUBLICBLOB"),
             None,
-            Some(buf.as_mut_slice()),
-            len,
+            Some(&mut buf),
             &mut len,
-            0,
+            NCRYPT_FLAGS(0),
         )?;
 
-        // TODO: convert blob to proper PEM
-        println!("PUBLIC KEY BLOB LENGTH: {}", len);
+        println!("PUBLIC KEY BLOB SIZE: {}", len);
     }
 
     Ok(())
