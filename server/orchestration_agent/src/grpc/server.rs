@@ -253,6 +253,7 @@ impl Service {
 
         let mut child = Command::new("python3")
             .arg("server/aggregator_agent/aggregator.py")
+            .env("PYTHONPATH", ".")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()

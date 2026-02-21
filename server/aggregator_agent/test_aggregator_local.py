@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import io
-from centralized_secure_store import SecureStore
+from core.centralized_secure_store import SecureStore
 from server.aggregator_agent.aggregator import AggregatorAgent
 
 store = SecureStore("./secure_store")

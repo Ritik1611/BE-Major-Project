@@ -46,7 +46,7 @@ class AggregatorAgent:
 
         # AES-GCM / KMS (SecureStore)
         if scheme.lower().startswith("aes") or scheme.lower().startswith("kms"):
-            from centralized_secure_store import SecureStore
+            from core.centralized_secure_store import SecureStore
 
             store = SecureStore("./secure_store")
             raw = store.decrypt_read("file://" + enc_path)
