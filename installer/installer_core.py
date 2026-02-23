@@ -45,7 +45,7 @@ BASE_DIR = Path.home() / ".federated"
 STATE_FILE = BASE_DIR / "state" / "install_state.json"
 KEYS_DIR = BASE_DIR / "keys"
 
-SERVER_ADDR = "tcp://0.tcp.in.ngrok.io:18767"
+SERVER_ADDR = "tcp://0.tcp.in.ngrok.io:19226"
 INSTALLER_OTP = None
 
 
