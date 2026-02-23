@@ -143,7 +143,38 @@ fn export_public_key() -> Result<()> {
             NCRYPT_FLAGS(0),
         )?;
 
-        println!("PUBLIC KEY BLOB SIZE: {}", len);
+        // PUBLICBLOB structure:
+        // BCRYPT_ECCPUBLIC_BLOB header (8 bytes)
+        // then X (32 bytes)
+        // then Y (32 bytes)
+
+        let x = &buf[8..40];
+        let y = &buf[40..72];
+
+        // Uncompressed EC point format
+        let mut ec_point = vec![0x04];
+        ec_point.extend(x);
+        ec_point.extend(y);
+
+        // ASN.1 header for P-256 SPKI
+        let spki_prefix: [u8; 26] = [
+            0x30, 0x59,
+            0x30, 0x13,
+            0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,
+            0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07,
+            0x03, 0x42, 0x00
+        ];
+
+        let mut spki = Vec::new();
+        spki.extend(spki_prefix);
+        spki.extend(ec_point);
+
+        let pem = format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----",
+            base64::engine::general_purpose::STANDARD.encode(spki)
+        );
+
+        println!("{}", pem);
     }
 
     Ok(())
