@@ -106,6 +106,22 @@ def install_runtime():
     shutil.copy2(src_client, dst_client)
     _chmod_exec(dst_client)
 
+    # ---- Windows TPM signer ----
+    if platform.system().lower() == "windows":
+        signer_src = RUNTIME_SRC / "windows_signer.exe"
+        signer_dst = bin_dir / "windows_signer.exe"
+
+        print("[DEBUG] Copying Windows signer from:", signer_src)
+        print("[DEBUG] Exists?:", signer_src.exists())
+
+        if not signer_src.exists():
+            raise RuntimeError("windows_signer.exe missing from runtime")
+
+        shutil.copy2(signer_src, signer_dst)
+        _chmod_exec(signer_dst)
+
+        print("[OK] Windows TPM signer installed")
+
     # 2. agents
     agents_dst = BASE_DIR / "agents"
     if agents_dst.exists():
