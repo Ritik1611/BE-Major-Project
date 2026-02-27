@@ -180,6 +180,8 @@ def install_runtime():
     )
 
     if IS_WINDOWS:
+        print("[DEBUG] Runtime path:", RUNTIME_SRC)
+        print("[DEBUG] Signer exists:", (RUNTIME_SRC / "windows_signer.exe").exists())
         shutil.copy2(
             RUNTIME_SRC / "windows_signer.exe",
             BASE_DIR / "bin" / "windows_signer.exe"
