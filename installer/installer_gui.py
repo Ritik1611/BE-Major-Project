@@ -7,6 +7,8 @@ import io
 # import your existing installer
 import installer_core
 
+print("INSTALLER CORE FILE:", installer_core.__file__)
+
 
 class InstallerGUI:
     def __init__(self, root):
