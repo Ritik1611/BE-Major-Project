@@ -138,6 +138,7 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
 # Main installer
 # --------------------------------------------------
 def main():
+    print("=== BUILD VERSION 2 WITH GUI INPUT FIX ===")
     # --------------------------------------------------
     # 1. Anti-debug (installer mode)
     # --------------------------------------------------
@@ -177,7 +178,12 @@ def main():
     # 6. Python dependencies
     # --------------------------------------------------
     print("[6] Installing Python dependencies")
-    install_python_deps()
+    try:
+        install_python_deps()
+        print("[DEBUG] Python deps installed")
+    except Exception as e:
+        print("[ERROR] install_python_deps crashed:", e)
+        raise
 
     # --------------------------------------------------
     # 7. Native ML dependencies
