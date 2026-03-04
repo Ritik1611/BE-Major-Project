@@ -125,30 +125,40 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
     SERVER_ADDR = server_addr
 
     # 3. Create secure channel (server TLS only)
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=(KEYS_DIR / "ca.pem").read_bytes()
+    )
+
     channel = grpc.secure_channel(
         SERVER_ADDR,
-        grpc.ssl_channel_credentials(
-            root_certificates=(KEYS_DIR / "ca.pem").read_bytes()
-        ),
-        options=(
+        creds,
+        options=[
             ('grpc.ssl_target_name_override', 'localhost'),
-        )
+            ('grpc.default_authority', 'localhost'),
+        ]
     )
 
     stub = OrchestratorStub(channel)
 
     # 4. Send enrollment request with CSR
-    resp = stub.EnrollDevice(
-        EnrollRequest(
-            enrollment_token=token,
-            device_pubkey=device_pubkey,
-            csr=client_csr.read_bytes(),
-        ),
-        timeout=10
-    )
+    try:
+        print("[DEBUG] Sending EnrollDevice RPC")
+        resp = stub.EnrollDevice(
+            EnrollRequest(
+                enrollment_token=token,
+                device_pubkey=device_pubkey,
+                csr=client_csr.read_bytes(),
+            ),
+            timeout=10
+        )
+    except Exception as e:
+        print("[ERROR] gRPC failed:", e)
+        raise
 
     if not resp.ok:
         sys.exit("[SECURITY] Enrollment failed")
+
+    print("[DEBUG] gRPC channel created")
 
     # 5. Store signed certificate
     client_cert_path = KEYS_DIR / "client.pem"
