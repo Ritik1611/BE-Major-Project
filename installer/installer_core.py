@@ -16,6 +16,12 @@ from fs.install_python_deps import install_python_deps
 from fs.install_openface import install_openface
 from fs.install_opensmile import install_opensmile
 
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+import datetime
+
 # -------------------------
 # Security
 # -------------------------
@@ -69,8 +75,9 @@ def write_install_state():
 
 
 def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
-    print("[DEBUG] Entered otp_enrollment()")
-    print("[DEBUG] KEYS_DIR =", KEYS_DIR)
+    print("[DEBUG] SERVER_ADDR =", server_addr)
+    print("[DEBUG] CA exists:", (KEYS_DIR / "ca.pem").exists())
+    print("[DEBUG] About to create gRPC channel")
     global INSTALLER_OTP
 
     import subprocess
@@ -83,21 +90,37 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
     client_key = KEYS_DIR / "client.key"
     client_csr = KEYS_DIR / "client.csr"
 
-    # 1. Generate private key
-    subprocess.run([
-        "openssl", "genrsa",
-        "-out", str(client_key),
-        "2048"
-    ], check=True)
+    # Generate private key
+    key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+    )
 
-    # 2. Generate CSR
-    subprocess.run([
-        "openssl", "req",
-        "-new",
-        "-key", str(client_key),
-        "-out", str(client_csr),
-        "-subj", "/CN=federated-device"
-    ], check=True)
+    # Save key
+    with open(client_key, "wb") as f:
+        f.write(
+            key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+
+    # Create CSR
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(
+            x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, u"federated-device"),
+            ])
+        )
+        .sign(key, hashes.SHA256())
+    )
+
+    csr_bytes = csr.public_bytes(serialization.Encoding.PEM)
+
+    with open(client_csr, "wb") as f:
+        f.write(csr_bytes)
 
     SERVER_ADDR = server_addr
 
@@ -120,7 +143,8 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
             enrollment_token=token,
             device_pubkey=device_pubkey,
             csr=client_csr.read_bytes(),
-        )
+        ),
+        timeout=10
     )
 
     if not resp.ok:
@@ -199,7 +223,7 @@ def main():
         install_opensmile()
     else:
         print("[8] Windows opensmile already bundled")
-        
+
     # --------------------------------------------------
     # 9. VERIFY dependencies (NOW they exist)
     # --------------------------------------------------
