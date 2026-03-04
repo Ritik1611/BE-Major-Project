@@ -258,6 +258,8 @@ pub async fn serve(
     builder = builder.tls_config(tls)?;
     println!("[DEBUG] TLS forced ON");
 
+    println!("Binding to: {}", cfg.server.addr);
+
     builder
         .add_service(OrchestratorServer::new(svc))
         .serve(cfg.server.addr.parse()?)
