@@ -249,8 +249,7 @@ pub async fn serve(
     );
 
     let tls = ServerTlsConfig::new()
-        .identity(server_identity)
-        .client_ca_root(client_ca);
+        .identity(server_identity);
 
     let mut builder = Server::builder();
 
