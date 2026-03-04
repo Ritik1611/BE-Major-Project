@@ -140,6 +140,8 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
 
     stub = OrchestratorStub(channel)
 
+    print("[DEBUG] gRPC channel created")
+
     # 4. Send enrollment request with CSR
     try:
         print("[DEBUG] Sending EnrollDevice RPC")
@@ -157,8 +159,6 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
 
     if not resp.ok:
         sys.exit("[SECURITY] Enrollment failed")
-
-    print("[DEBUG] gRPC channel created")
 
     # 5. Store signed certificate
     client_cert_path = KEYS_DIR / "client.pem"

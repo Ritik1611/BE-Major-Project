@@ -20,7 +20,8 @@ def _run(cmd):
         cmd,
         check=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW
     )
 
 
