@@ -26,7 +26,8 @@ def sign_message(message: bytes) -> bytes:
                 [str(WINDOWS_SIGNER)],
                 input=message,
                 stdout=subprocess.PIPE,
-                check=True
+                check=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             return proc.stdout
 
@@ -43,7 +44,8 @@ def sign_message(message: bytes) -> bytes:
                 input=message,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                check=True
+                check=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             return proc.stdout
 
@@ -91,7 +93,8 @@ def get_device_pubkey() -> bytes:
             proc = subprocess.run(
                 [str(WINDOWS_SIGNER), "--export-pub"],
                 stdout=subprocess.PIPE,
-                check=True
+                check=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             return proc.stdout
 

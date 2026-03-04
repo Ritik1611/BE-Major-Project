@@ -34,7 +34,8 @@ def install_openface():
                 "-ExecutionPolicy", "Bypass",
                 "-File", str(ps1)
             ],
-            check=True
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
 
     exe = DST / "FeatureExtraction.exe"

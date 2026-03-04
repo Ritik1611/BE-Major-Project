@@ -13,7 +13,8 @@ def install_python_deps():
 
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-r", str(REQ_FILE)],
-        check=True
+        check=True,
+        creationflags=subprocess.CREATE_NO_WINDOW
     )
 
     print("[OK] Python dependencies installed")

@@ -70,7 +70,7 @@ def _extract_opensmile_features(
     ]
 
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW)
         data = np.genfromtxt(tmp_csv, delimiter=';', names=True, dtype=None, encoding='utf-8')
         if data.ndim == 0:  # single row
             feature_dict = {name: float(data[name]) for name in data.dtype.names}

@@ -91,7 +91,7 @@ class VideoProcessor:
                 "-out_dir", str(feature_out)
             ]
 
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
         # Encrypt blurred video and OpenFace features
         uri_video = self.storage.encrypt_write(f"file://{out_path}", out_path.read_bytes())

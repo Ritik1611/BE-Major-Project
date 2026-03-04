@@ -40,7 +40,8 @@ def _linux_tpm_check():
             ["tpm2_getcap", "properties-fixed"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            check=True
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
     except Exception:
         sys.exit("[SECURITY] TPM tools not available or TPM blocked")
@@ -75,7 +76,8 @@ def _run(cmd):
         cmd,
         check=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW
     )
 
 

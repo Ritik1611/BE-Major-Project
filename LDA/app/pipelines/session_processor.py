@@ -88,7 +88,7 @@ def _extract_audio_from_video(video_path: str, out_wav_path: str, sr: int = 1600
         "-vn", "-hide_banner", "-loglevel", "error",
         str(out_path)
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg audio extraction failed: {proc.stderr.strip()}")
     return str(out_path)
@@ -109,7 +109,7 @@ def _cut_audio_segment(input_wav: str, out_wav: str, start: float, end: float) -
         "-ac", "1", "-ar", "16000",
         str(out_path)
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg cut audio failed: {proc.stderr.strip()}")
     return str(out_path)
@@ -130,7 +130,7 @@ def _cut_video_segment(input_video: str, out_video: str, start: float, end: floa
         "-c", "copy",
         str(out_path)
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
     if proc.returncode != 0:
         # try a re-encode fallback (some formats don't allow -c copy with -ss)
         cmd2 = [
@@ -140,7 +140,7 @@ def _cut_video_segment(input_video: str, out_video: str, start: float, end: floa
             "-c:v", "libx264", "-c:a", "aac", "-strict", "-2",
             str(out_path)
         ]
-        proc2 = subprocess.run(cmd2, capture_output=True, text=True)
+        proc2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
         if proc2.returncode != 0:
             raise RuntimeError(f"ffmpeg cut video failed: {proc.stderr.strip()} | {proc2.stderr.strip()}")
     return str(out_path)
