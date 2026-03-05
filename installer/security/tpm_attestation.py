@@ -36,13 +36,17 @@ def _linux_tpm_check():
         sys.exit("[SECURITY] TPM not found")
 
     try:
-        subprocess.run(
-            ["tpm2_getcap", "properties-fixed"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-            creationflags=subprocess.CREATE_NO_WINDOW
-        )
+        kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "check": True
+        }
+
+        if platform.system().lower() == "windows":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        subprocess.run(["tpm2_getcap", "properties-fixed"], **kwargs)
+
     except Exception:
         sys.exit("[SECURITY] TPM tools not available or TPM blocked")
 
@@ -57,17 +61,16 @@ def _linux_tpm_check():
 # --------------------------------------------------
 def _windows_tpm_check():
     try:
-        subprocess.run(
-            [
-                "powershell",
-                "-Command",
-                "Get-Tpm"
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
-        print("[TPM] Windows TPM detected")
+        result = subprocess.check_output(
+            ["powershell", "-Command", "(Get-Tpm).TpmReady"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+
+        if result.lower() != "true":
+            sys.exit("[SECURITY] TPM not ready")
+
+        print("[TPM] Windows TPM detected and ready")
+
     except Exception:
         sys.exit("[SECURITY] TPM not found or disabled on Windows")
 
@@ -76,13 +79,16 @@ def _windows_tpm_check():
 # Linux-only provisioning
 # --------------------------------------------------
 def _run(cmd):
-    subprocess.run(
-        cmd,
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW
-    )
+    kwargs = {
+        "check": True,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL
+    }
+
+    if platform.system().lower() == "windows":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    subprocess.run(cmd, **kwargs)
 
 
 def provision_tpm_identity():
