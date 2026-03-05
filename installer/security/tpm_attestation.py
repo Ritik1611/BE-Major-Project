@@ -179,15 +179,18 @@ def get_device_pubkey_installer_safe() -> bytes:
             return pubkey_file.read_bytes()
 
         print("[TPM] Initializing Windows TPM key")
+        print("[DEBUG] Running:", signer, "--pubkey", pubkey_file)
 
         subprocess.run(
             [str(signer), "--init"],
-            check=True
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
 
         subprocess.run(
             [str(signer), "--pubkey", str(pubkey_file)],
-            check=True
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
 
         if not pubkey_file.exists():

@@ -36,8 +36,12 @@ fn main() -> Result<()> {
     }
 
     // default mode → sign stdin
-    sign_stdin()?;
-    Ok(())
+    eprintln!("windows_signer requires arguments:");
+    eprintln!("  --init");
+    eprintln!("  --pubkey <file>");
+    eprintln!("  (signing mode used only by runtime)");
+
+    std::process::exit(1);
 }
 
 fn export_public_key_bytes() -> Result<Vec<u8>> {
