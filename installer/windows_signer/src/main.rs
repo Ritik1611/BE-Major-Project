@@ -19,7 +19,6 @@ fn main() -> Result<()> {
 
         "--init" => {
             open_or_create_key()?;
-            println!("[TPM] Windows TPM key initialized");
         }
 
         "--pubkey" => {

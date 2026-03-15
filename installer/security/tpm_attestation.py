@@ -184,15 +184,17 @@ def get_device_pubkey_installer_safe() -> bytes:
         subprocess.run(
             [str(signer), "--init"],
             check=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            timeout=10
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
 
         subprocess.run(
             [str(signer), "--pubkey", str(pubkey_file)],
             check=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            timeout=10
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
 
         if not pubkey_file.exists():
