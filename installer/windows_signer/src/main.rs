@@ -118,8 +118,8 @@ fn open_or_create_key() -> Result<NCRYPT_KEY_HANDLE> {
             provider,
             &mut key,
             w!("FederatedDeviceKey"),
-            CERT_KEY_SPEC(0),
-            NCRYPT_MACHINE_KEY_FLAG,
+            0,
+            NCRYPT_FLAGS(0),
         ).is_ok()
         {
             NCryptFreeObject(provider);
@@ -131,8 +131,18 @@ fn open_or_create_key() -> Result<NCRYPT_KEY_HANDLE> {
             &mut key,
             w!("ECDSA_P256"),
             w!("FederatedDeviceKey"),
-            CERT_KEY_SPEC(0),
-            NCRYPT_MACHINE_KEY_FLAG,
+            0,
+            NCRYPT_FLAGS(0),
+        )?;
+
+        let policy: u32 = NCRYPT_ALLOW_EXPORT_NONE;
+
+        NCryptSetProperty(
+            key,
+            w!("Export Policy"),
+            Some(&policy.to_le_bytes()),
+            4,
+            NCRYPT_FLAGS(0),
         )?;
 
         NCryptFinalizeKey(key, NCRYPT_FLAGS(0))?;
