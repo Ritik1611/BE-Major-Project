@@ -189,6 +189,9 @@ def get_device_pubkey_installer_safe() -> bytes:
             creationflags=subprocess.CREATE_NO_WINDOW
         )
 
+        print("[TPM] Signer init completed")
+        print("[TPM] Exporting public key...")
+
         subprocess.run(
             [str(signer), "--pubkey", str(pubkey_file)],
             check=True,
@@ -196,6 +199,8 @@ def get_device_pubkey_installer_safe() -> bytes:
             stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW
         )
+
+        print("[TPM] Public key export finished")
 
         if not pubkey_file.exists():
             sys.exit("[SECURITY] Failed to obtain TPM public key")
