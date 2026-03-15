@@ -19,11 +19,16 @@ WINDOWS_SIGNER = BASE_DIR / "bin" / "windows_signer.exe"
 # --------------------------------------------------
 
 def sign_message(message: bytes) -> bytes:
+    if IS_WINDOWS and not WINDOWS_SIGNER.exists():
+        trigger_self_destruct("Windows TPM signer missing")
+    
+    print("[TPM] Signing message using Windows TPM signer")
+    
     try:
         if IS_WINDOWS:
             # Call Windows CNG signer
             proc = subprocess.run(
-                [str(WINDOWS_SIGNER)],
+                [str(WINDOWS_SIGNER), "--sign"],
                 input=message,
                 stdout=subprocess.PIPE,
                 check=True,
