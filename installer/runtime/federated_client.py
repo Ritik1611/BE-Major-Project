@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
-
+from runtime.grpc.orchestrator_pb2 import CSR
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 
@@ -39,7 +39,7 @@ def main():
     # 4. Idempotent registration
     try:
         stub.RegisterDevice(
-            stub._request_serializer.CSR(device_pubkey=device_pubkey),
+            stub.RegisterDevice(CSR(device_pubkey=device_pubkey)),
             timeout=10
         )
     except Exception:
