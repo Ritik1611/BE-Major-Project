@@ -119,7 +119,7 @@ fn open_or_create_key() -> Result<NCRYPT_KEY_HANDLE> {
             provider,
             &mut key,
             w!("FederatedDeviceKey"),
-            0,
+            CERT_KEY_SPEC(0),
             NCRYPT_MACHINE_KEY_FLAG,
         ).is_ok()
         {
@@ -132,7 +132,7 @@ fn open_or_create_key() -> Result<NCRYPT_KEY_HANDLE> {
             &mut key,
             w!("ECDSA_P256"),
             w!("FederatedDeviceKey"),
-            0,
+            CERT_KEY_SPEC(0),
             NCRYPT_MACHINE_KEY_FLAG,
         )?;
 
