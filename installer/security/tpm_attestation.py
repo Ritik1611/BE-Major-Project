@@ -183,10 +183,7 @@ def get_device_pubkey_installer_safe() -> bytes:
 
         subprocess.run(
             [str(signer), "--init"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW
+            check=True
         )
 
         print("[TPM] Signer init completed")
@@ -194,10 +191,7 @@ def get_device_pubkey_installer_safe() -> bytes:
 
         subprocess.run(
             [str(signer), "--pubkey", str(pubkey_file)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW
+            check=True
         )
 
         print("[TPM] Public key export finished")
