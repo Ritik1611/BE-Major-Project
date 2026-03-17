@@ -178,21 +178,40 @@ def get_device_pubkey_installer_safe() -> bytes:
         if pubkey_file.exists():
             return pubkey_file.read_bytes()
 
-        print("[TPM] Initializing Windows TPM key")
-        print("[DEBUG] Running:", signer, "--pubkey", pubkey_file)
+        print("[TPM] Running signer init...")
 
-        subprocess.run(
+        proc = subprocess.Popen(
             [str(signer), "--init"],
-            check=True
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
         )
+
+        proc.wait(timeout=10)
 
         print("[TPM] Signer init completed")
+
         print("[TPM] Exporting public key...")
 
-        subprocess.run(
+        proc = subprocess.Popen(
             [str(signer), "--pubkey", str(pubkey_file)],
-            check=True
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
         )
+
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise RuntimeError("TPM pubkey export HANG detected")
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"TPM pubkey export failed: {proc.returncode}")
 
         print("[TPM] Public key export finished")
 
