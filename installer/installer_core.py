@@ -196,17 +196,19 @@ def main(otp=None, server_addr=None):
     create_secure_layout()
 
     # --------------------------------------------------
-    # 3. TPM identity (safe for installer)
+    # 3. Runtime payload (code + configs)
     # --------------------------------------------------
-    print("[3] TPM identity provisioning")
+    print("[3] Installing runtime payload")
+    install_runtime()
+    
+    # --------------------------------------------------
+    # 4. TPM identity (safe for installer)
+    # --------------------------------------------------
+    print("[4] TPM identity provisioning")
     provision_tpm_identity()
     device_pubkey = get_device_pubkey_installer_safe()
 
-    # --------------------------------------------------
-    # 4. Runtime payload (code + configs)
-    # --------------------------------------------------
-    print("[4] Installing runtime payload")
-    install_runtime()
+    
 
     # --------------------------------------------------
     # 5. Windows runtime prerequisites
