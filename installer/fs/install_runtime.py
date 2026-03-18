@@ -57,17 +57,20 @@ def install_windows_deps():
         return
 
     src = RUNTIME_SRC / "deps" / "windows"
-    dst = BASE_DIR / "deps" / "windows"
+    dst_root = BASE_DIR / "deps"
+    dst = dst_root / "windows"
 
-    if not src.exists():
-        raise RuntimeError(
-            "[INSTALLER] Missing runtime/deps/windows in installer"
-        )
-
-    # Fresh install to avoid mismatched binaries
+    # 🔥 Ensure clean state
     if dst.exists():
         shutil.rmtree(dst)
 
+    # 🔥 Also remove parent if weird structure exists
+    if dst_root.exists():
+        for item in dst_root.iterdir():
+            if item.name == "windows":
+                shutil.rmtree(item)
+
+    # 🔥 Now copy cleanly
     shutil.copytree(src, dst)
 
     _chmod_tree(dst)
