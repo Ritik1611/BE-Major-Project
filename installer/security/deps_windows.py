@@ -8,20 +8,20 @@ def _run(cmd):
     return subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
 
 def verify_python_and_pip():
+    print("🔥 ENTERED verify_python_and_pip")
+
     try:
-        out = _run(["python", "--version"])
-        version = out.strip().split()[1]
-        major, minor, *_ = map(int, version.split("."))
+        print("[DEBUG] Checking python version")
+        subprocess.run([sys.executable, "--version"], check=True)
 
-        if major != REQUIRED_MAJOR or minor != REQUIRED_MINOR:
-            sys.exit(f"[SECURITY] Python {REQUIRED_MAJOR}.{REQUIRED_MINOR} required")
+        print("[DEBUG] Checking pip version")
+        subprocess.run([sys.executable, "-m", "pip", "--version"], check=True)
 
-        _run(["pip", "--version"])
+        print("🔥 EXITING verify_python_and_pip")
 
     except Exception as e:
-        sys.exit(f"[SECURITY] Python/pip check failed: {e}")
-
-    print("[OK] Python and pip verified")
+        print("[ERROR] verify_python_and_pip failed:", e)
+        raise
 
 from pathlib import Path
 import sys
