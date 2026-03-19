@@ -60,6 +60,7 @@ def install_windows_deps():
     dst_root = BASE_DIR / "deps"
     dst = dst_root / "windows"
 
+    print("🔥🔥🔥 NEW CODE EXECUTED 🔥🔥🔥")
     # 🔥 Ensure clean state
     if dst.exists():
         shutil.rmtree(dst)
