@@ -116,6 +116,8 @@ impl Orchestrator for Service {
         req: Request<Csr>,
     ) -> Result<Response<Certificate>, Status> {
 
+        Self::require_client_cert(&req)?;
+
         let pubkey = req.into_inner().device_pubkey;
         let device_id = derive_device_id(&pubkey);
 
@@ -131,8 +133,10 @@ impl Orchestrator for Service {
     // --------------------------------------------------
     async fn get_round(
         &self,
-        _req: Request<DeviceId>,
+        req: Request<DeviceId>,
     ) -> Result<Response<RoundMetadata>, Status> {
+
+        Self::require_client_cert(&req)?;
 
         let round = self.state
             .rounds
@@ -166,6 +170,7 @@ impl Orchestrator for Service {
         req: Request<Receipt>,
     ) -> Result<Response<Ack>, Status> {
 
+        Self::require_client_cert(&req)?;
         let receipt = req.into_inner();
 
         // 2. Verify receipt signature
@@ -223,6 +228,16 @@ impl Orchestrator for Service {
         }
 
         Ok(Response::new(Ack { ok: true }))
+    }
+
+    fn require_client_cert<T>(req: &Request<T>) -> Result<(), Status> {
+        let certs = req.peer_certs();
+
+        if certs.is_none() {
+            return Err(Status::unauthenticated("client certificate required"));
+        }
+
+        Ok(())
     }
 }
 

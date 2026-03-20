@@ -14,9 +14,15 @@ def create_grpc_stub(server_addr: str):
             certificate_chain=(BASE / "keys" / "client.pem").read_bytes(),
         )
 
+        host = server_addr.split(":")[0]
+
         channel = grpc.secure_channel(
             server_addr,
-            creds
+            creds,
+            options=[
+                ('grpc.ssl_target_name_override', host),
+                ('grpc.default_authority', host),
+            ]
         )
 
         # 🔥 ensure connection works
