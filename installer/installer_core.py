@@ -187,12 +187,31 @@ def create_venv():
     BASE = Path.home() / ".federated"
     VENV_DIR = BASE / "venv"
 
-    if not VENV_DIR.exists():
-        print("[STEP] Creating virtual environment")
-        subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
-        print("[OK] venv created")
-    else:
+    if VENV_DIR.exists():
         print("[OK] venv already exists")
+        return
+
+    print("[STEP] Creating virtual environment")
+
+    # 🔥 Find real python (NOT PyInstaller exe)
+    python_cmd = "python"
+
+    try:
+        subprocess.run(
+            [python_cmd, "--version"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+    except Exception:
+        raise RuntimeError("System Python not found. Please install Python.")
+
+    subprocess.run(
+        [python_cmd, "-m", "venv", str(VENV_DIR)],
+        check=True
+    )
+
+    print("[OK] venv created")
 
 # --------------------------------------------------
 # Main installer
@@ -244,7 +263,7 @@ def main(otp=None, server_addr=None):
         verify_python_and_pip()
 
     create_venv()
-
+    
     # --------------------------------------------------
     # 6. Python dependencies
     # --------------------------------------------------
