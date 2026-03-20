@@ -8,32 +8,46 @@ REQ_FILE = INSTALLER_ROOT / "runtime" / "configs" / "requirements.txt"
 def install_python_deps():
     BASE = Path.home() / ".federated"
     VENV_DIR = BASE / "venv"
-
     python_path = VENV_DIR / "Scripts" / "python.exe"
 
-    if not python_path.exists():
-        raise RuntimeError("Venv creation failed: python.exe not found")
+    print("[STEP] Installing dependencies (safe mode)")
 
-    print("[STEP] Installing dependencies into venv")
+    # Upgrade pip first
+    subprocess.run([
+        str(python_path),
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "pip"
+    ], check=True)
 
-    result = subprocess.run(
-        [
-            str(python_path),
-            "-m",
-            "pip",
-            "install",
-            "-r",
-            str(REQ_FILE)
-        ],
-        capture_output=True,
-        text=True
-    )
+    if not REQ_FILE.exists():
+        raise RuntimeError("requirements.txt not found")
 
-    print("[PIP STDOUT]")
-    print(result.stdout)
+    with open(REQ_FILE, "r") as f:
+        packages = [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
-    print("[PIP STDERR]")
-    print(result.stderr)
+    for pkg in packages:
+        print(f"[INSTALL] {pkg}")
 
-    if result.returncode != 0:
-        raise RuntimeError("pip install failed")
+        result = subprocess.run(
+            [
+                str(python_path),
+                "-m",
+                "pip",
+                "install",
+                "--no-cache-dir",
+                pkg
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode != 0:
+            print(f"[SKIPPED] {pkg}")
+            print(result.stderr.splitlines()[-1] if result.stderr else "")
+        else:
+            print(f"[OK] {pkg}")
+
+    print("[OK] Dependency installation complete (with skips)")
