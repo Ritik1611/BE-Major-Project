@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 import sys
 from pathlib import Path
+import subprocess
 
 BASE = Path(__file__).resolve().parent.parent
+VENV_PYTHON = BASE / "venv" / "Scripts" / "python.exe"
 
+# 🚨 Re-exec inside venv if not already
+if not str(sys.executable).lower().startswith(str(VENV_PYTHON).lower()):
+    print("[DEBUG] Switching to venv Python")
+    subprocess.run([str(VENV_PYTHON), __file__, *sys.argv[1:]])
+    sys.exit(0)
+
+# ✅ Ensure imports work
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+print("[DEBUG] USING PYTHON:", sys.executable)
 print("[DEBUG] PYTHONPATH =", sys.path[:3])
 
 import hashlib
@@ -43,7 +53,7 @@ def main():
     # 4. Idempotent registration
     try:
         stub.RegisterDevice(
-            stub.RegisterDevice(CSR(device_pubkey=device_pubkey)),
+            CSR(device_pubkey=device_pubkey),
             timeout=10
         )
     except Exception:

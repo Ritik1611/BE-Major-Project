@@ -183,6 +183,16 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
 
     print("[OK] Device enrolled + client certificate installed")
 
+def create_venv():
+    BASE = Path.home() / ".federated"
+    VENV_DIR = BASE / "venv"
+
+    if not VENV_DIR.exists():
+        print("[STEP] Creating virtual environment")
+        subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+        print("[OK] venv created")
+    else:
+        print("[OK] venv already exists")
 
 # --------------------------------------------------
 # Main installer
@@ -232,6 +242,8 @@ def main(otp=None, server_addr=None):
 
         check_vc_runtime()
         verify_python_and_pip()
+
+    create_venv()
 
     # --------------------------------------------------
     # 6. Python dependencies

@@ -6,15 +6,17 @@ INSTALLER_ROOT = Path(__file__).resolve().parents[1]
 REQ_FILE = INSTALLER_ROOT / "runtime" / "configs" / "requirements.txt"
 
 def install_python_deps():
-    if not REQ_FILE.exists():
-        sys.exit("[FATAL] requirements.txt missing")
+    BASE = Path.home() / ".federated"
+    VENV_DIR = BASE / "venv"
+    python_path = VENV_DIR / "Scripts" / "python.exe"
 
-    print("[STEP 5] Installing Python dependencies")
+    subprocess.run([
+        str(python_path),
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        str(REQ_FILE)
+    ], check=True)
 
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", str(REQ_FILE)],
-        check=True,
-        creationflags=subprocess.CREATE_NO_WINDOW
-    )
-
-    print("[OK] Python dependencies installed")
+    print("[OK] Dependencies installed in venv")

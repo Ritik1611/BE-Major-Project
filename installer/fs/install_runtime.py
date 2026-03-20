@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from runtime.validate_deps import main as validate_deps
 import platform
+import subprocess
 
 IS_WINDOWS = platform.system().lower() == "windows"
 
@@ -141,17 +142,6 @@ def install_runtime():
     )
     _chmod_tree(agents_dst)
 
-    # 3. grpc stubs
-    grpc_dst = BASE_DIR / "grpc"
-    if grpc_dst.exists():
-        shutil.rmtree(grpc_dst)
-
-    shutil.copytree(
-        RUNTIME_SRC / "grpc",
-        grpc_dst,
-    )
-    _chmod_tree(grpc_dst)
-
     # 4. configs
     configs_dst = BASE_DIR / "configs"
     if configs_dst.exists():
@@ -176,6 +166,17 @@ def install_runtime():
         shutil.copy2(f, runtime_dst / f.name)
 
     _chmod_tree(runtime_dst)
+
+    # 3. grpc stubs
+    grpc_dst = BASE_DIR / "runtime" / "grpc"
+    if grpc_dst.exists():
+        shutil.rmtree(grpc_dst)
+
+    shutil.copytree(
+        RUNTIME_SRC / "grpc",
+        grpc_dst,
+    )
+    _chmod_tree(grpc_dst)
 
     # 6. core shared modules
     core_src = RUNTIME_SRC / "core"
