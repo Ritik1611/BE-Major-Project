@@ -8,7 +8,13 @@ REQ_FILE = INSTALLER_ROOT / "runtime" / "configs" / "requirements.txt"
 def install_python_deps():
     BASE = Path.home() / ".federated"
     VENV_DIR = BASE / "venv"
+
     python_path = VENV_DIR / "Scripts" / "python.exe"
+
+    if not python_path.exists():
+        raise RuntimeError("Venv creation failed: python.exe not found")
+
+    print("[STEP] Installing dependencies into venv")
 
     subprocess.run([
         str(python_path),
