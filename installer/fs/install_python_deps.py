@@ -16,13 +16,24 @@ def install_python_deps():
 
     print("[STEP] Installing dependencies into venv")
 
-    subprocess.run([
-        str(python_path),
-        "-m",
-        "pip",
-        "install",
-        "-r",
-        str(REQ_FILE)
-    ], check=True)
+    result = subprocess.run(
+        [
+            str(python_path),
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(REQ_FILE)
+        ],
+        capture_output=True,
+        text=True
+    )
 
-    print("[OK] Dependencies installed in venv")
+    print("[PIP STDOUT]")
+    print(result.stdout)
+
+    print("[PIP STDERR]")
+    print(result.stderr)
+
+    if result.returncode != 0:
+        raise RuntimeError("pip install failed")
