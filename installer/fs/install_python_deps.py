@@ -10,23 +10,29 @@ def install_python_deps():
     VENV_DIR = BASE / "venv"
     python_path = VENV_DIR / "Scripts" / "python.exe"
 
-    print("[STEP] Installing dependencies (robust mode)")
+    print("[STEP] Installing dependencies (robust mode)", flush=True)
 
-    # Upgrade pip
-    subprocess.run([
-        str(python_path),
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "pip"
-    ])
+    # ✅ Upgrade pip (WITH OUTPUT)
+    print("[STEP] Upgrading pip...", flush=True)
+    subprocess.run(
+        [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        text=True
+    )
+
+    if not REQ_FILE.exists():
+        raise RuntimeError("requirements.txt not found")
 
     with open(REQ_FILE, "r") as f:
-        packages = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        packages = [
+            line.strip()
+            for line in f
+            if line.strip() and not line.startswith("#")
+        ]
 
     for pkg in packages:
-        print(f"\n[INSTALL] {pkg}")
+        print(f"\n[INSTALL] {pkg}", flush=True)
 
         try:
             process = subprocess.Popen(
@@ -40,26 +46,23 @@ def install_python_deps():
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True
+                text=True,
+                bufsize=1
             )
 
-            # 🔥 STREAM OUTPUT LIVE
-            for line in process.stdout:
-                print(line.strip())
+            # ✅ STREAM OUTPUT SAFELY
+            if process.stdout:
+                for line in iter(process.stdout.readline, ''):
+                    print(line.rstrip(), flush=True)
 
-            process.wait(timeout=120)  # ⏱️ max 2 min per package
+            process.wait()  # ❌ removed timeout (important)
 
             if process.returncode != 0:
-                print(f"[SKIPPED] {pkg}")
-
+                print(f"[SKIPPED] {pkg}", flush=True)
             else:
-                print(f"[OK] {pkg}")
-
-        except subprocess.TimeoutExpired:
-            process.kill()
-            print(f"[TIMEOUT - SKIPPED] {pkg}")
+                print(f"[OK] {pkg}", flush=True)
 
         except Exception as e:
-            print(f"[ERROR - SKIPPED] {pkg}: {e}")
+            print(f"[ERROR - SKIPPED] {pkg}: {e}", flush=True)
 
-    print("\n[OK] Dependency installation complete")
+    print("\n[OK] Dependency installation complete", flush=True)
