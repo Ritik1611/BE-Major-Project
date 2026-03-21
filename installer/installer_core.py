@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-
 import sys
+sys.stdout.reconfigure(line_buffering=True)
+
 import json
 import grpc
 import platform
@@ -275,6 +276,8 @@ def main(otp=None, server_addr=None):
         print("[ERROR] install_python_deps crashed:", e)
         raise
 
+    print("🔥 DEPS DONE → MOVING TO ENROLLMENT", flush=True)
+
     # --------------------------------------------------
     # 7. Native ML dependencies
     # --------------------------------------------------
@@ -323,7 +326,7 @@ def main(otp=None, server_addr=None):
     print("[13] Persisting install state")
     write_install_state()
 
-    print("\n[OK] Installer finished successfully")
+    print("🔥 INSTALLER COMPLETED SUCCESSFULLY", flush=True)
 
 
 # --------------------------------------------------
