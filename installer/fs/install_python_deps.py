@@ -34,7 +34,7 @@ def install_python_deps():
         print(f"\n[INSTALL] {pkg}", flush=True)
 
         try:
-            process = subprocess.Popen(
+            result = subprocess.run(
                 [
                     str(python_path),
                     "-m",
@@ -43,26 +43,17 @@ def install_python_deps():
                     "--no-cache-dir",
                     pkg
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
+                capture_output=True,
+                text=True
             )
 
-            # ✅ STREAM OUTPUT SAFELY
-            if process.stdout:
-                for line in process.stdout:
-                    try:
-                        print(line.rstrip(), flush=True)
-                    except:
-                        pass  # GUI-safe
+            print(result.stdout)
+            print(result.stderr)
 
-            process.wait()  # ❌ removed timeout (important)
-
-            if process.returncode != 0:
-                print(f"[SKIPPED] {pkg}", flush=True)
+            if result.returncode != 0:
+                print(f"[SKIPPED] {pkg}")
             else:
-                print(f"[OK] {pkg}", flush=True)
+                print(f"[OK] {pkg}")
 
         except Exception as e:
             print(f"[ERROR - SKIPPED] {pkg}: {e}", flush=True)
