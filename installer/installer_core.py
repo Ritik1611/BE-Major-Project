@@ -92,7 +92,7 @@ def write_install_state():
 
 
 def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
-    logging.info("[DEBUG] OTP received by installer:", token)
+    logging.info(f"[DEBUG] OTP received by installer: {token}")
     logging.info("[DEBUG] SERVER_ADDR =", server_addr)
     logging.info("[DEBUG] CA exists:", (KEYS_DIR / "ca.pem").exists())
     logging.info("[DEBUG] About to create gRPC channel")
@@ -292,7 +292,7 @@ def main(otp=None, server_addr=None):
         logging.error("[ERROR] install_python_deps crashed: %s", e)
         raise
 
-    logging.info("🔥 DEPS DONE → MOVING TO ENROLLMENT", flush=True)
+    logging.info("🔥 DEPS DONE → MOVING TO ENROLLMENT")
 
     # --------------------------------------------------
     # 7. Native ML dependencies
@@ -342,7 +342,7 @@ def main(otp=None, server_addr=None):
     logging.info("[13] Persisting install state")
     write_install_state()
 
-    logging.info("🔥 INSTALLER COMPLETED SUCCESSFULLY", flush=True)
+    logging.info("🔥 INSTALLER COMPLETED SUCCESSFULLY")
 
 
 # --------------------------------------------------

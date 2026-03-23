@@ -59,3 +59,4 @@ def install_python_deps():
             print(f"[ERROR - SKIPPED] {pkg}: {e}", flush=True)
 
     print("\n[OK] Dependency installation complete", flush=True)
+    sys.stdout.flush()
