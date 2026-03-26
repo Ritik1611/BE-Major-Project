@@ -34,16 +34,28 @@ OPTIONAL = {
 def run(cmd, name):
     print(f"[TEST] {name}")
     try:
-        out = subprocess.check_output(
+        process = subprocess.Popen(
             cmd,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=30
+            text=True
         )
+
+        if process.stdout:
+            for line in process.stdout:
+                print(line.strip())
+
+        process.wait(timeout=30)
+
+        if process.returncode != 0:
+            sys.exit(f"[FAIL] {name}")
+
         print("[OK]")
-        return out
-    except subprocess.CalledProcessError as e:
-        print(e.output.decode(errors="ignore"))
-        sys.exit(f"[FAIL] {name}")
+
+    except subprocess.TimeoutExpired:
+        process.kill()
+        sys.exit(f"[FAIL] {name}: timeout")
+
     except Exception as e:
         sys.exit(f"[FAIL] {name}: {e}")
 
@@ -82,7 +94,10 @@ def check():
 # Main
 # --------------------------------------------------
 def main():
+    if not VENV_PYTHON.exists():
+        sys.exit(f"[FAIL] Venv Python not found: {VENV_PYTHON}")
     # 1. Python sanity (VENV)
+    print("[DEBUG] Using venv python:", VENV_PYTHON)
     run([str(VENV_PYTHON), "--version"], "Venv Python available")
 
     # 2. OpenFace
