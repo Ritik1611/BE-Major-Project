@@ -8,7 +8,7 @@ from agents.lda.main import preprocess, PreprocessRequest
 from agents.trainer.trainer_mentalbert_privacy import orchestrate as trainer_orchestrate
 from agents.dp.dp_agent import DPAgent
 from agents.enc.enc_agent import EncryptionAgent
-from centralized_secure_store import SecureStore
+from core.centralized_secure_store import SecureStore
 from grpc.orchestrator_pb2 import DeviceId, Receipt
 from runtime.tpm_guard import sign_message
 
