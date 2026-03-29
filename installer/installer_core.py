@@ -207,31 +207,30 @@ def create_venv():
     BASE = Path.home() / ".federated"
     VENV_DIR = BASE / "venv"
 
+    print("[STEP] Creating virtual environment")
+
     if VENV_DIR.exists():
-        logging.info("[OK] venv already exists")
+        print("[INFO] venv already exists, skipping")
         return
 
-    logging.info("[STEP] Creating virtual environment")
-
-    # 🔥 Find real python (NOT PyInstaller exe)
-    python_cmd = "python"
-
-    try:
-        subprocess.run(
-            [python_cmd, "--version"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-    except Exception:
-        raise RuntimeError("System Python not found. Please install Python.")
-
-    subprocess.run(
-        [python_cmd, "-m", "venv", str(VENV_DIR)],
-        check=True
+    result = subprocess.run(
+        [sys.executable, "-m", "venv", str(VENV_DIR)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
     )
 
-    logging.info("[OK] venv created")
+    if result.returncode != 0:
+        print(result.stderr)
+        raise RuntimeError("Failed to create venv")
+
+    # ✅ VERIFY CREATION
+    python_path = VENV_DIR / "Scripts" / "python.exe"
+
+    if not python_path.exists():
+        raise RuntimeError("Venv created but python.exe missing")
+
+    print("[OK] venv created successfully")
 
 # --------------------------------------------------
 # Main installer
@@ -262,15 +261,13 @@ def main(otp=None, server_addr=None):
     # --------------------------------------------------
     logging.info("[3] Installing runtime payload")
     install_runtime()
-    
+    create_venv()
     # --------------------------------------------------
     # 4. TPM identity (safe for installer)
     # --------------------------------------------------
     logging.info("[4] TPM identity provisioning")
     provision_tpm_identity()
     device_pubkey = get_device_pubkey_installer_safe()
-
-    
 
     # --------------------------------------------------
     # 5. Windows runtime prerequisites
@@ -281,8 +278,6 @@ def main(otp=None, server_addr=None):
 
         check_vc_runtime()
         verify_python_and_pip()
-
-    create_venv()
     
     # --------------------------------------------------
     # 6. Python dependencies
