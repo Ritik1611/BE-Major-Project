@@ -13,12 +13,18 @@ def install_python_deps():
     print("[STEP] Installing dependencies (robust mode)", flush=True)
 
     # ✅ Upgrade pip (WITH OUTPUT)
-    print("[STEP] Upgrading pip...", flush=True)
-    subprocess.run(
+    res = subprocess.run(
         [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True
     )
+
+    print(res.stdout)
+    print(res.stderr)
+
+    if res.returncode != 0:
+        raise RuntimeError("pip upgrade failed")
 
     if not REQ_FILE.exists():
         raise RuntimeError("requirements.txt not found")
@@ -34,7 +40,7 @@ def install_python_deps():
         print(f"\n[INSTALL] {pkg}", flush=True)
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [
                     str(python_path),
                     "-m",
@@ -43,14 +49,17 @@ def install_python_deps():
                     "--no-cache-dir",
                     pkg
                 ],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True
             )
 
-            print(result.stdout)
-            print(result.stderr)
+            for line in process.stdout:
+                print(line.strip())
 
-            if result.returncode != 0:
+            process.wait()
+
+            if process.returncode != 0:
                 print(f"[SKIPPED] {pkg}")
             else:
                 print(f"[OK] {pkg}")
