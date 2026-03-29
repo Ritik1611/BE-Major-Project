@@ -16,6 +16,10 @@ EXCLUDE_PREFIXES = {
     "tpm/",
     "secrets/",
     "state/",
+    "runtime/tmp/",
+    "runtime/cache/",
+    "runtime/__pycache__/",
+    "agents/__pycache__/",
 }
 
 INTEGRITY_SCOPE = [
@@ -43,6 +47,8 @@ def compute_tree_hash(root: Path) -> str:
             continue
         if not _should_include(path):
             continue
+        if path.suffix == ".pyc":
+            continue
 
         rel = path.relative_to(root).as_posix().encode()
         h.update(rel)
@@ -69,9 +75,7 @@ def write_baseline():
 
 def verify_integrity():
     if not BASELINE_FILE.exists():
-        print("[WARN] No baseline found, creating one")
-        write_baseline()
-        return True
+        trigger_self_destruct("[SECURITY] Missing baseline")
 
     current = compute_tree_hash(FEDERATED_DIR)
     stored = BASELINE_FILE.read_text().strip()
