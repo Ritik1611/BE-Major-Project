@@ -356,16 +356,16 @@ def main(otp=None, server_addr=None):
         seal_master_secret()
 
     # --------------------------------------------------
-    # 12. Integrity baseline
+    # 12. Persist install state
     # --------------------------------------------------
-    logging.info("[12] Writing integrity baseline")
-    write_baseline()
+    logging.info("[12] Persisting install state")
+    write_install_state()
 
     # --------------------------------------------------
-    # 13. Persist install state
+    # 13. Integrity baseline
     # --------------------------------------------------
-    logging.info("[13] Persisting install state")
-    write_install_state()
+    logging.info("[13] Writing integrity baseline")
+    write_baseline()
 
     logging.info("🔥 INSTALLER COMPLETED SUCCESSFULLY")
 

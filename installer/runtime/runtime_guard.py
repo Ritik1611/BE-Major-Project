@@ -1,20 +1,17 @@
-from .integrity_guard import verify_integrity
+from security.integrity import verify_integrity
 from .tpm_guard import unseal_master_secret
 from .self_destruct import trigger_self_destruct
-from .validate_deps import main as validate_deps
 import os
 import platform
+import time
 
 IS_WINDOWS = platform.system().lower() == "windows"
 
 
 def runtime_guard():
     # 1. Integrity verification
+    time.sleep(1)
     verify_integrity()
-
-    # 2. Dependency validation (Windows only)
-    if IS_WINDOWS:
-        validate_deps()
 
     # 3. TPM binding
     master_secret = unseal_master_secret()
