@@ -289,6 +289,21 @@ def main(otp=None, server_addr=None):
     # --------------------------------------------------
     logging.info("[4] TPM identity provisioning")
     provision_tpm_identity()
+    if IS_WINDOWS:
+        logging.info("[TPM] Initializing Windows signer")
+
+        signer = BASE_DIR / "bin" / "windows_signer.exe"
+
+        try:
+            subprocess.run(
+                [str(signer), "--init"],
+                check=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            logging.info("[TPM] Windows signer initialized")
+        except Exception as e:
+            logging.error(f"[TPM] Signer init failed: {e}")
+            raise
     device_pubkey = get_device_pubkey_installer_safe()
 
     # --------------------------------------------------

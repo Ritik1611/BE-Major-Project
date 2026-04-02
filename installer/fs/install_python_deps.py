@@ -45,8 +45,7 @@ def install_python_deps():
                 check=True
             )
 
-            for line in result.stdout:
-                print(line.strip())
+            print(result.stdout)
 
             if result.returncode != 0:
                 print(f"[SKIPPED] {pkg}")
