@@ -41,18 +41,8 @@ def install_python_deps():
 
         try:
             result = subprocess.run(
-                [
-                    str(python_path),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--no-cache-dir",
-                    "--force-reinstall",
-                    "--no-deps",
-                    pkg
-                ],
-                capture_output=True,
-                text=True
+                [str(python_path), "-m", "pip", "install", pkg],
+                check=True
             )
 
             for line in result.stdout:
