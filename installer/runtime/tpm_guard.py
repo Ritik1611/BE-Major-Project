@@ -19,6 +19,9 @@ WINDOWS_SIGNER = BASE_DIR / "bin" / "windows_signer.exe"
 # --------------------------------------------------
 
 def sign_message(message: bytes) -> bytes:
+    if not message:
+        trigger_self_destruct("Empty message for signing")
+
     if IS_WINDOWS and not WINDOWS_SIGNER.exists(): 
         trigger_self_destruct("Windows TPM signer missing")
     
@@ -102,7 +105,7 @@ def get_device_pubkey() -> bytes:
 
             try:
                 proc = subprocess.run(
-                    [str(WINDOWS_SIGNER), "--export-pub"],
+                    [str(WINDOWS_SIGNER), "--pubkey", str(PUBKEY_PEM)],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     check=True,
@@ -113,11 +116,16 @@ def get_device_pubkey() -> bytes:
                     print("[DEBUG] Empty public key output")
                     return b""
 
-                return proc.stdout
+                if not PUBKEY_PEM.exists():
+                    print("[DEBUG] Pubkey file not created")
+                    return b""
+
+                return PUBKEY_PEM.read_bytes()
 
             except Exception as e:
                 print("[DEBUG] Signer failed:", e)
-                print("[DEBUG] STDERR:", proc.stderr if 'proc' in locals() else None)
+                if 'proc' in locals():
+                    print("[DEBUG] STDERR:", proc.stderr.decode(errors="ignore"))
                 return b""
 
         else:

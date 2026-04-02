@@ -63,6 +63,9 @@ def main():
         )
     except Exception:
         pass
+    
+    if mode == "--run-once":
+        mode = "run-once"
 
     if mode == "run-once":
         run_pipeline(stub, device_id, master_secret)
