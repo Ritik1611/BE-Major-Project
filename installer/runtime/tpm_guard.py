@@ -96,19 +96,35 @@ def unseal_master_secret() -> bytes:
 def get_device_pubkey() -> bytes:
     try:
         if IS_WINDOWS:
-            # Ask signer to export PEM public key
-            proc = subprocess.run(
-                [str(WINDOWS_SIGNER), "--export-pub"],
-                stdout=subprocess.PIPE,
-                check=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            return proc.stdout
+            if not WINDOWS_SIGNER.exists():
+                print("[DEBUG] Windows signer missing at:", WINDOWS_SIGNER)
+                return b""
+
+            try:
+                proc = subprocess.run(
+                    [str(WINDOWS_SIGNER), "--export-pub"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+
+                if not proc.stdout:
+                    print("[DEBUG] Empty public key output")
+                    return b""
+
+                return proc.stdout
+
+            except Exception as e:
+                print("[DEBUG] Signer failed:", e)
+                print("[DEBUG] STDERR:", proc.stderr if 'proc' in locals() else None)
+                return b""
 
         else:
             if not PUBKEY_PEM.exists():
                 sys.exit("[SECURITY] TPM identity not initialized")
             return PUBKEY_PEM.read_bytes()
 
-    except Exception:
-        trigger_self_destruct("Failed to retrieve device public key")
+    except Exception as e:
+        print("[DEBUG] PUBKEY ERROR:", e)
+        return b""   # TEMP: do not self-destruct
