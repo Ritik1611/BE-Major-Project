@@ -255,7 +255,7 @@ pub async fn serve(
 
     let tls = ServerTlsConfig::new()
         .identity(server_identity)
-        .client_ca_root(client_ca);
+        .client_ca_root(client_ca.clone());
 
     println!("[TLS] TLS ENABLED (app-level mTLS enforcement)");
     
@@ -280,14 +280,14 @@ pub async fn serve(
 // --------------------------------------------------
 impl Service {
     fn require_client_cert<T>(req: &Request<T>) -> Result<(), Status> {
-        let certs = req.peer_certs();
+        // Allow if TLS handshake already validated client cert
+        if let Some(certs) = req.peer_certs() {
+            if !certs.is_empty() {
+                return Ok(());
+            }
+        }
 
-        match certs {
-            Some(certs) if !certs.is_empty() => Ok(()),
-            _ => Err(Status::unauthenticated("client certificate required")),
-        }?;
-
-        Ok(())
+        Err(Status::unauthenticated("client certificate required"))
     }
 
     fn run_aggregation(&self, round_id: u64) -> Result<(), Status> {
