@@ -48,7 +48,7 @@ class AggregatorAgent:
         if scheme.lower().startswith("aes") or scheme.lower().startswith("kms"):
             from core.centralized_secure_store import SecureStore
 
-            store = SecureStore("./secure_store")
+            store = SecureStore(agent="aggregator", root="./secure_store")
             raw = store.decrypt_read("file://" + enc_path)
 
             try:
