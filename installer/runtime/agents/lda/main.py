@@ -110,7 +110,7 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
         agent="lda",
         root=Path(cfg["storage"]["root"]).resolve()
     )
-    rm = CentralReceiptManager(agent="lda-session-processor")
+    rm = CentralReceiptManager(agent="lda")
 
     openface_bin = cfg["ingest"]["video"]["params"]["openface"]["binary_path"]
     haar_path = cfg["ingest"]["video"]["params"]["openface"].get("haar_path")
@@ -242,7 +242,7 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
     manifest_uri = store.encrypt_write(f"file://{store.root / mrel}", manifest_bytes)
 
     final_receipt = rm.create_receipt(
-        agent="lda-session-processor",
+        agent="lda",
         session_id=session_id,
         operation="preprocess_complete",
         params={"mode": req.mode, "config_uri": req.config_uri},
