@@ -36,7 +36,7 @@ class EncryptionAgent:
 
         # Centralized SecureStore
         self.store = SecureStore(
-            agent="enc-agent",
+            agent="enc",
             root="./secure_store"
         )
 

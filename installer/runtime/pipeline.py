@@ -69,7 +69,7 @@ def run_pipeline(stub, device_id: bytes, master_secret: bytes):
     # 4) Differential Privacy
     # ==================================================
     store = SecureStore(
-        agent="trainer-agent",
+        agent="trainer",
         root=Path.home() / ".federated" / "secure_store"
     )
 
