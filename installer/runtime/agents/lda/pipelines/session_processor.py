@@ -690,7 +690,7 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
         root=Path(cfg["storage"]["root"]).resolve()
     )
     # centralized receipt manager
-    receipt_mgr = CentralReceiptManager(agent="lda-session-processor")
+    receipt_mgr = CentralReceiptManager(agent="lda")
 
     # If mode == text and only text_input provided
     if mode == "text":
@@ -713,7 +713,7 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
         }
         # create and store receipt for text ingest
         receipt = receipt_mgr.create_receipt(
-            agent="lda-session-processor",
+            agent="lda",
             session_id=session_id,
             operation="text_ingest",
             params={"text_len": len(text_input or "")},
@@ -831,7 +831,7 @@ def process_session_file(session_id: str, cfg: dict, work_dir: Path,
         # create receipt per segment and store it encrypted
         try:
             receipt = receipt_mgr.create_receipt(
-                agent="lda-session-processor",
+                agent="lda",
                 session_id=session_id,
                 operation="segment_process",
                 params={"start": start, "end": end, "speaker": speaker, "role": role},
