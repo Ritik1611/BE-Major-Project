@@ -107,7 +107,7 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
     cfg = _load_config(req.config_uri)
     # create SecureStore with explicit named argument 'root'
     store = SecureStore(
-        agent="lda-session-processor",
+        agent="lda",
         root=Path(cfg["storage"]["root"]).resolve()
     )
     rm = CentralReceiptManager(agent="lda-session-processor")

@@ -121,7 +121,7 @@ def process_audio_file(
     rows = []
 
     storage = SecureStore(
-        agent="lda-audio",
+        agent="lda",
         root=Path(cfg["storage"]["root"]).resolve()
     )
     rm = CentralReceiptManager(agent="lda-audio")

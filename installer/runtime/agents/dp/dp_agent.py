@@ -38,7 +38,7 @@ class DPAgent:
         else:
             # Default to explicit named args to avoid positional mismatch
             self.store = SecureStore(
-                agent="dp-agent",
+                agent="dp",
                 root=Path("./secure_store")
             )
 

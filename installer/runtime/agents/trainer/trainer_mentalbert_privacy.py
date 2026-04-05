@@ -239,7 +239,7 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
     # -------- Load records --------
     if p.suffix == ".jsonl":
         rows = []
-        store = SecureStore(agent="lda-session-processor", root=Path("/home/ritik26/Desktop/BE-Major-Project/secure_store").resolve())
+        store = SecureStore(agent="lda", root=Path("/home/ritik26/Desktop/BE-Major-Project/secure_store").resolve())
 
         with open(p, "r", encoding="utf-8") as f:
             for line in f:
@@ -724,7 +724,7 @@ def orchestrate(
         SECURE_ROOT = Path("/home/ritik26/Desktop/BE-Major-Project/secure_store")
 
         store = SecureStore(
-            agent="lda-session-processor",
+            agent="lda",
             root=SECURE_ROOT  # must match LDA cfg["storage"]["root"]
         )
 
@@ -787,7 +787,7 @@ def orchestrate(
 
     # secure store + receipts
     store = SecureStore(
-        agent="trainer-agent",
+        agent="trainer",
         root=LOCAL_SAVE_DIR / "secure_store"
     )
     rm = CentralReceiptManager(agent="trainer-agent")
