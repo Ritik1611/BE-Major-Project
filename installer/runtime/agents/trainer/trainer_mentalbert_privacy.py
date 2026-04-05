@@ -239,11 +239,11 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
     # -------- Load records --------
     if p.suffix == ".jsonl":
         rows = []
-        BASE = Path.home() / ".federated"
-
+        _CANONICAL_STORE = Path.home() / ".federated" / "data" / "secure_store"
+ 
         store = SecureStore(
             agent="lda",
-            root=BASE / "data" / "secure_store"
+            root=_CANONICAL_STORE,
         )
 
         with open(p, "r", encoding="utf-8") as f:
@@ -725,12 +725,13 @@ def orchestrate(
     rag_mode = kwargs.get("rag_mode", None)
 
     if input_path.startswith("file://") and input_path.endswith(".enc"):
-        # IMPORTANT: must use SAME root as LDA
-        BASE = Path.home() / ".federated"
-
+        # Phase-1 fix: root doesn't matter — key is always canonical.
+        # Using the same agent="lda" ensures HKDF context matches what LDA wrote.
+        _CANONICAL_STORE = Path.home() / ".federated" / "data" / "secure_store"
+ 
         store = SecureStore(
             agent="lda",
-            root=BASE / "data" / "secure_store"
+            root=_CANONICAL_STORE,
         )
 
         manifest_bytes = store.decrypt_read(input_path)
@@ -793,10 +794,10 @@ def orchestrate(
     # secure store + receipts
     store = SecureStore(
         agent="trainer",
-        root=LOCAL_SAVE_DIR / "secure_store"
+        root=LOCAL_SAVE_DIR,          # Phase-1 fix: LOCAL_SAVE_DIR is already the store root
     )
     rm = CentralReceiptManager(agent="trainer-agent")
-
+ 
     if mode == "autonomous":
         # cheap explainability on first batch
         sample = None

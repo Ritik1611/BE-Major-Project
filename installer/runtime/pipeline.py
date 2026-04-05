@@ -12,13 +12,15 @@ from core.centralized_secure_store import SecureStore
 from runtime.grpc.orchestrator_pb2 import DeviceId, Receipt
 from runtime.tpm_guard import sign_message
 
-# --------------------------------------------------
-# Runtime pipeline (NO security / NO gRPC setup here)
-# --------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Canonical store root — used by every agent that needs to share data.
+# Must match _CANONICAL_ROOT in centralized_secure_store.py
+# ─────────────────────────────────────────────────────────────────────────────
+_STORE_ROOT = Path.home() / ".federated" / "data" / "secure_store"
 
-LDA_MODE = "session"
+LDA_MODE   = "session"
 CONFIG_URI = f"file://{Path.home()}/.federated/configs/local_config.yaml"
-VIDEO_DIR = str(Path.home() / ".federated" / "data" / "input")  # installer may override later
+VIDEO_DIR  = str(Path.home() / ".federated" / "data" / "input")
 
 
 def run_pipeline(stub, device_id: bytes, master_secret: bytes):
@@ -46,7 +48,6 @@ def run_pipeline(stub, device_id: bytes, master_secret: bytes):
         mode=LDA_MODE,
         inputs={"video_dir": VIDEO_DIR},
         config_uri=CONFIG_URI,
-        session_id=session_id,
     )
     lda_result = preprocess(lda_req)
 
@@ -67,10 +68,13 @@ def run_pipeline(stub, device_id: bytes, master_secret: bytes):
 
     # ==================================================
     # 4) Differential Privacy
+    #
+    # Phase-1 fix: store root must match where trainer wrote the delta.
+    # Both trainer and dp_agent now use _STORE_ROOT.
     # ==================================================
     store = SecureStore(
         agent="trainer",
-        root=Path.home() / ".federated" / "secure_store"
+        root=_STORE_ROOT,   # ← was: Path.home() / ".federated" / "secure_store"
     )
 
     dp_agent = DPAgent(
@@ -102,13 +106,11 @@ def run_pipeline(stub, device_id: bytes, master_secret: bytes):
     ).digest()
 
     msg = (
-        device_id +
-        round_meta.round_id.to_bytes(8, "big") +
-        payload_hash
+        device_id
+        + round_meta.round_id.to_bytes(8, "big")
+        + payload_hash
     )
 
-    # NOTE:
-    # signature is produced by TPM-backed key in grpc_client
     signature = sign_message(msg)
 
     receipt = Receipt(

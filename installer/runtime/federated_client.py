@@ -34,48 +34,48 @@ from runtime.pipeline import run_pipeline
 from runtime.tpm_guard import get_device_pubkey
 from runtime.daemon import daemon_loop
 import time
+from pathlib import Path
+
+_LOCK = Path.home() / ".federated" / "state" / "runtime.lock"
 
 def main():
     mode = "daemon"
     if len(sys.argv) > 1:
         mode = sys.argv[1]
 
-    # 1. Security gate
-    master_secret = runtime_guard()
-
-    # 2. TPM-backed identity
-    device_pubkey = get_device_pubkey()
-    device_id = hashlib.sha256(device_pubkey).digest()
-
-    # 3. Secure channel
-    SERVER_ADDR = os.environ.get("FED_SERVER")
-
-    if not SERVER_ADDR:
-        SERVER_ADDR = input("Enter server address (host:port): ").strip()
-
-    stub = create_grpc_stub(SERVER_ADDR)
-
-    # 4. Idempotent registration
     try:
-        stub.RegisterDevice(
-            CSR(device_pubkey=device_pubkey),
-            timeout=10
-        )
-    except Exception:
-        pass
-    
-    if mode == "--run-once":
-        mode = "run-once"
+        master_secret = runtime_guard()
+        device_pubkey = get_device_pubkey()
+        device_id = hashlib.sha256(device_pubkey).digest()
 
-    if mode == "run-once":
-        run_pipeline(stub, device_id, master_secret)
-        return
+        SERVER_ADDR = os.environ.get("FED_SERVER")
+        if not SERVER_ADDR:
+            SERVER_ADDR = input("Enter server address (host:port): ").strip()
 
-    if mode == "daemon":
-        daemon_loop(stub, device_id, master_secret)
-        return
+        stub = create_grpc_stub(SERVER_ADDR)
 
-    print("Unknown mode:", mode)
+        try:
+            stub.RegisterDevice(CSR(device_pubkey=device_pubkey), timeout=10)
+        except Exception:
+            pass
+
+        if mode in ("--run-once", "run-once"):
+            run_pipeline(stub, device_id, master_secret)
+            return
+
+        if mode == "daemon":
+            daemon_loop(stub, device_id, master_secret)
+            return
+
+        print("Unknown mode:", mode)
+
+    finally:
+        # Always clean up the lock, even on exception
+        if _LOCK.exists():
+            try:
+                _LOCK.unlink()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
