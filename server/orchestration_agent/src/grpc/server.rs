@@ -254,7 +254,8 @@ pub async fn serve(
     );
 
     let tls = ServerTlsConfig::new()
-        .identity(server_identity);
+        .identity(server_identity)
+        .client_ca_root(client_ca);
 
     println!("[TLS] TLS ENABLED (app-level mTLS enforcement)");
     

@@ -45,7 +45,7 @@ integrity_guard()
 # ---------- Config / Defaults ----------
 MENTALBERT_PRETRAIN = "mental/mental-bert-base-uncased"
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-LOCAL_SAVE_DIR = Path("./trainer_outputs")
+LOCAL_SAVE_DIR = Path.home() / ".federated" / "data" / "secure_store"
 LOCAL_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Safety hyperparameters (tunable)
@@ -239,7 +239,12 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
     # -------- Load records --------
     if p.suffix == ".jsonl":
         rows = []
-        store = SecureStore(agent="lda", root=Path("/home/ritik26/Desktop/BE-Major-Project/secure_store").resolve())
+        BASE = Path.home() / ".federated"
+
+        store = SecureStore(
+            agent="lda",
+            root=BASE / "data" / "secure_store"
+        )
 
         with open(p, "r", encoding="utf-8") as f:
             for line in f:
@@ -721,11 +726,11 @@ def orchestrate(
 
     if input_path.startswith("file://") and input_path.endswith(".enc"):
         # IMPORTANT: must use SAME root as LDA
-        SECURE_ROOT = Path("/home/ritik26/Desktop/BE-Major-Project/secure_store")
+        BASE = Path.home() / ".federated"
 
         store = SecureStore(
             agent="lda",
-            root=SECURE_ROOT  # must match LDA cfg["storage"]["root"]
+            root=BASE / "data" / "secure_store"
         )
 
         manifest_bytes = store.decrypt_read(input_path)
