@@ -51,7 +51,7 @@ impl Orchestrator for Service {
     &self,
     req: Request<EnrollRequest>,
 ) -> Result<Response<EnrollResponse>, Status> {
-
+        println!("[SERVER] EnrollDevice called");
         use std::fs;
         use std::process::Command;
         use std::io::Write;
@@ -254,8 +254,7 @@ pub async fn serve(
     );
 
     let tls = ServerTlsConfig::new()
-        .identity(server_identity)
-        .client_ca_root(client_ca.clone());
+        .identity(server_identity);
 
     println!("[TLS] TLS ENABLED (app-level mTLS enforcement)");
     

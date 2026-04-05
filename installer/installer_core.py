@@ -96,7 +96,7 @@ def write_install_state():
 
 def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
     logging.info(f"[DEBUG] OTP received by installer: {token}")
-    logging.info("[DEBUG] SERVER_ADDR =", server_addr)
+    logging.info(f"[DEBUG] SERVER_ADDR = {server_addr}")
     logging.info("[DEBUG] CA exists:", (KEYS_DIR / "ca.pem").exists())
     logging.info("[DEBUG] About to create gRPC channel")
     global INSTALLER_OTP
@@ -154,14 +154,12 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
 
     logging.info("🔥 STEP 10: STARTING ENROLLMENT 🔥")
 
-    host = SERVER_ADDR.split(":")[0]
-
     channel = grpc.secure_channel(
         SERVER_ADDR,
         creds,
         options=[
-            ('grpc.ssl_target_name_override', host),
-            ('grpc.default_authority', host),
+            ('grpc.ssl_target_name_override', 'localhost'),
+            ('grpc.default_authority', 'localhost'),
         ]
     )
 
