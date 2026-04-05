@@ -26,6 +26,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 import shutil
 import logging
+from dotenv import load_dotenv
 
 from core.centralized_secure_store import SecureStore
 from core.centralised_receipts import CentralReceiptManager
@@ -311,11 +312,8 @@ def _diarize_audio(audio_wav: str, cfg: dict) -> List[Dict[str, Any]]:
         try:
             from pyannote.audio import Pipeline
             # Try to get token from environment or config
-            hf_token = (
-                os.environ.get("HF_TOKEN") or
-                cfg.get("huggingface_token") or
-                cfg.get("pyannote_token")
-            )
+            load_dotenv()
+            hf_token = os.getenv("HF_TOKEN")
             if not hf_token:
                 log.warning("No Hugging Face token found for pyannote diarization. Set HF_TOKEN env or add to config.")
             pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization", use_auth_token=hf_token)
