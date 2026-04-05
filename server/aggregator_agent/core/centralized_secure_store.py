@@ -32,6 +32,7 @@ class SecureStore:
             key_path = self.root / "master.key"
         self.key_path = Path(key_path)
         self.master_key = self._load_or_create_master_key()
+        print("[DEBUG STORE]", self.agent)
 
     def _load_or_create_master_key(self) -> bytes:
         """Load or generate a global master key (shared across all agents)."""
