@@ -9,6 +9,8 @@ from core.centralized_secure_store import SecureStore
 
 from installer.security.integrity import integrity_guard
 integrity_guard()
+_DP_STORE_DIR  = Path.home() / ".federated" / "data" / "secure_store" / "dp_updates"
+_DP_RECEIPT_DIR = Path.home() / ".federated" / "data" / "receipts"
 
 class DPAgent:
     SUPPORTED_MECHANISMS = {
@@ -20,8 +22,8 @@ class DPAgent:
         clip_norm: float = 1.0,
         noise_multiplier: float = 1.0,
         mechanism: str = "gaussian",
-        secure_store_dir: str = "secure_store/local_updates",
-        receipts_dir: str = "receipts",
+        secure_store_dir: str = str(_DP_STORE_DIR),   # ← absolute default
+        receipts_dir: str = str(_DP_RECEIPT_DIR),      # ← absolute default
         store: Optional['SecureStore'] = None
     ):
         self.clip = float(clip_norm)
@@ -36,10 +38,10 @@ class DPAgent:
         if store is not None:
             self.store = store
         else:
-            # Default to explicit named args to avoid positional mismatch
+            # Phase-1 fix: use canonical root so master.key is shared
             self.store = SecureStore(
                 agent="dp",
-                root=Path("./secure_store")
+                root=Path.home() / ".federated" / "data" / "secure_store",
             )
 
         # Centralized receipt manager

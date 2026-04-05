@@ -1,5 +1,6 @@
 import os, json, time, base64
 from typing import Optional, Dict, Any
+from pathlib import Path
 
 # Optional libs
 try:
@@ -34,10 +35,10 @@ class EncryptionAgent:
         os.makedirs(self.final_store_dir, exist_ok=True)
         os.makedirs(self.receipts_dir, exist_ok=True)
 
-        # Centralized SecureStore
+        # Phase-1 fix: canonical root ensures master.key is shared across agents
         self.store = SecureStore(
             agent="enc",
-            root="./secure_store"
+            root=Path.home() / ".federated" / "data" / "secure_store",
         )
 
         # AWS KMS if needed
