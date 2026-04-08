@@ -106,7 +106,8 @@ class MultiModalDataset(Dataset):
 
     def __getitem__(self, idx):
         r = self.records[idx]
-        def _safe_text(r):
+        def _safe_text(r) -> str:
+            """Return transcript text, defaulting to empty string."""
             return (r.get("transcript") or r.get("text") or "").strip()
 
         text = _safe_text(r)
@@ -298,48 +299,42 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
 
     # -------- FILTER BAD TRANSCRIPTS (FIXED) --------
     def _filter_records(records):
+        """
+        Filter records before training.
+        - "failed": ASR crashed entirely (infrastructure problem) → drop
+        - "empty": no speech detected in segment (normal) → keep with empty text
+        - "ok": transcript present → keep
+        - missing key: keep (older data without status field)
+        """
         filtered = []
         dropped = 0
-
         for r in records:
             derived = r.get("derived") or {}
-
-            # Handle JSON string case
+            # derived may be a JSON string (from parquet)
             if isinstance(derived, str):
                 try:
                     import json
                     derived = json.loads(derived)
                 except Exception:
                     derived = {}
-
             status = derived.get("transcript_status", "ok")
-
-            # Only drop HARD failures
             if status == "failed":
                 dropped += 1
                 continue
-
             filtered.append(r)
-
+    
         if dropped:
             import logging
             logging.getLogger(__name__).warning(
                 "Dropped %d records with transcript_status=failed", dropped
             )
-
+    
         if not filtered:
             raise RuntimeError(
                 "All records were dropped (transcript_status=failed for all). "
                 "Check your ASR setup."
             )
-
         return filtered
-
-
-    # Apply filter
-    records = _filter_records(records)
-
-    return records
 
 def collate_batch(batch):
     input_ids = torch.stack([b["input_ids"] for b in batch], dim=0)
