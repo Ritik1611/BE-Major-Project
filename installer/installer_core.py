@@ -131,7 +131,7 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
     if len(token) < 6:
         sys.exit("[SECURITY] Invalid OTP — must be at least 6 characters")
 
-    # ── 1. TCP pre-flight — fail fast with clear message ─────────────────────
+    # TCP pre-flight
     try:
         host, port = _parse_addr(server_addr)
     except Exception as e:
@@ -143,90 +143,103 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
         msg = (
             f"[ENROLL] Cannot reach server at {host}:{port}.\n"
             f"  — Is the Rust orchestrator running on the server?\n"
-            f"  — Is port {port} open in the firewall?\n"
-            f"  — Is the server address correct? (got: {server_addr})"
+            f"  — Is port {port} open in the firewall?"
         )
         logging.error(msg)
         sys.exit(msg)
 
-    logging.info("[ENROLL] TCP pre-check OK — server is reachable at %s:%d", host, port)
+    logging.info("[ENROLL] TCP pre-check OK")
 
-    # ── 2. Key + CSR generation ───────────────────────────────────────────────
+    # Key + CSR generation
     KEYS_DIR.mkdir(parents=True, exist_ok=True)
     client_key = KEYS_DIR / "client.key"
     client_csr = KEYS_DIR / "client.csr"
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     with open(client_key, "wb") as f:
-        f.write(
-            key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
 
     csr = (
         x509.CertificateSigningRequestBuilder()
-        .subject_name(x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, u"federated-device"),
-        ]))
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"federated-device")]))
         .sign(key, hashes.SHA256())
     )
     with open(client_csr, "wb") as f:
         f.write(csr.public_bytes(serialization.Encoding.PEM))
 
-    # ── 3. Build gRPC TLS channel ─────────────────────────────────────────────
-    ca_pem = KEYS_DIR / "ca.pem"
-    if not ca_pem.exists():
-        msg = (
-            f"[ENROLL] CA certificate not found at {ca_pem}.\n"
-            f"  Run: bash certs/gen_certs.sh {host}\n"
-            f"  Then copy certs/ca.pem → installer/runtime/keys/ca.pem and rebuild."
-        )
-        logging.error(msg)
-        sys.exit(msg)
-
-    creds = grpc.ssl_channel_credentials(
-        root_certificates=ca_pem.read_bytes()
-    )
-    channel = grpc.secure_channel(
-        server_addr,
-        creds,
-        options=[
-            ("grpc.keepalive_time_ms", 10_000),
-            ("grpc.keepalive_timeout_ms", 5_000),
-        ]
-    )
-
-    # ── 4. Wait for channel ready — explicit timeout + error logging ──────────
-    logging.info("STEP 10: STARTING ENROLLMENT")
-    logging.info("[ENROLL] Waiting for TLS channel ready (timeout=15s)...")
+    # ── CHANNEL: try insecure first, fall back to TLS ──────────────────────
+    logging.info("[ENROLL] Trying insecure channel (3s timeout)...")
+    channel = None
 
     try:
-        grpc.channel_ready_future(channel).result(timeout=15)
-        logging.info("[ENROLL] TLS channel READY")
-    except grpc.FutureTimeoutError:
-        channel.close()
-        msg = (
-            f"[ENROLL] TLS handshake timed out connecting to {server_addr}.\n"
-            f"  Most likely causes:\n"
-            f"  1. The CA certificate on the client does not match the server's CA.\n"
-            f"     Regenerate: bash certs/gen_certs.sh {host}\n"
-            f"     Copy: certs/ca.pem → installer/runtime/keys/ca.pem, then rebuild.\n"
-            f"  2. The server certificate has no SAN for {host}.\n"
-            f"     Check: openssl x509 -in certs/server.pem -noout -ext subjectAltName\n"
-            f"  3. The Rust server started but TLS config is wrong."
+        ch = grpc.insecure_channel(
+            server_addr,
+            options=[
+                ("grpc.keepalive_time_ms", 5_000),
+                ("grpc.keepalive_timeout_ms", 3_000),
+            ]
         )
-        logging.error(msg)
-        sys.exit(msg)
-    except Exception as e:
-        channel.close()
-        msg = f"[ENROLL] gRPC channel error: {type(e).__name__}: {e}"
-        logging.error(msg)
-        sys.exit(msg)
+        grpc.channel_ready_future(ch).result(timeout=3)
+        channel = ch
+        logging.info("[ENROLL] Connected via insecure channel (server has enable_tls=false)")
+    except Exception as e_insecure:
+        logging.info("[ENROLL] Insecure failed (%s), trying TLS...", type(e_insecure).__name__)
+        try:
+            ch.close()
+        except Exception:
+            pass
 
-    # ── 5. Send EnrollDevice RPC ──────────────────────────────────────────────
+        ca_pem = KEYS_DIR / "ca.pem"
+        if not ca_pem.exists():
+            msg = (
+                f"[ENROLL] Server rejected insecure AND CA cert not found at {ca_pem}.\n"
+                f"  Fix A (easier): set enable_tls=false in orchestrator.toml, rebuild server.\n"
+                f"  Fix B: run bash certs/gen_certs.sh {host} and copy ca.pem to installer."
+            )
+            logging.error(msg)
+            sys.exit(msg)
+
+        try:
+            creds = grpc.ssl_channel_credentials(root_certificates=ca_pem.read_bytes())
+            ch = grpc.secure_channel(
+                server_addr,
+                creds,
+                options=[
+                    ("grpc.keepalive_time_ms", 10_000),
+                    ("grpc.keepalive_timeout_ms", 5_000),
+                ]
+            )
+            grpc.channel_ready_future(ch).result(timeout=10)
+            channel = ch
+            logging.info("[ENROLL] Connected via TLS channel")
+        except grpc.FutureTimeoutError:
+            try:
+                ch.close()
+            except Exception:
+                pass
+            msg = (
+                f"[ENROLL] TLS handshake timed out to {server_addr}.\n"
+                f"  Most likely: CA cert mismatch. Regenerate with:\n"
+                f"    bash certs/gen_certs.sh {host}\n"
+                f"  Then copy certs/ca.pem → installer/runtime/keys/ca.pem and rebuild exe.\n"
+                f"  OR: set enable_tls=false in orchestrator.toml for local testing."
+            )
+            logging.error(msg)
+            sys.exit(msg)
+        except Exception as e_tls:
+            try:
+                ch.close()
+            except Exception:
+                pass
+            msg = f"[ENROLL] TLS channel error: {type(e_tls).__name__}: {e_tls}"
+            logging.error(msg)
+            sys.exit(msg)
+
+    # ── RPC call ────────────────────────────────────────────────────────────
     stub = OrchestratorStub(channel)
     logging.info("[ENROLL] Sending EnrollDevice RPC...")
 
@@ -242,26 +255,22 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
         logging.info("STEP 10: ENROLLMENT COMPLETED")
     except grpc.RpcError as e:
         channel.close()
-        code = e.code()
+        code    = e.code()
         details = e.details()
         if code == grpc.StatusCode.PERMISSION_DENIED:
             msg = (
-                f"[ENROLL] Server rejected OTP: {details}\n"
-                f"  The OTP may have expired (valid 60 seconds) or is incorrect.\n"
-                f"  Generate a new OTP from the server console and retry."
+                f"[ENROLL] OTP rejected: {details}\n"
+                f"  OTP may have expired. Generate a new one from the server and retry immediately."
             )
         elif code == grpc.StatusCode.UNAVAILABLE:
-            msg = (
-                f"[ENROLL] Server unavailable: {details}\n"
-                f"  The server may have crashed or restarted. Check server logs."
-            )
+            msg = f"[ENROLL] Server unavailable: {details}"
         else:
-            msg = f"[ENROLL] gRPC RpcError ({code}): {details}"
+            msg = f"[ENROLL] gRPC error ({code}): {details}"
         logging.error(msg)
         sys.exit(msg)
     except Exception as e:
         channel.close()
-        msg = f"[ENROLL] Unexpected error during EnrollDevice: {type(e).__name__}: {e}"
+        msg = f"[ENROLL] Unexpected error: {type(e).__name__}: {e}"
         logging.error(msg)
         raise
     finally:
@@ -277,7 +286,7 @@ def otp_enrollment(device_pubkey: bytes, token: str, server_addr: str):
     client_cert_path.write_bytes(resp.client_cert)
     client_cert_path.chmod(0o600)
 
-    logging.info("[ENROLL] Device enrolled — client certificate installed at %s", client_cert_path)
+    logging.info("[ENROLL] Device enrolled — cert at %s", client_cert_path)
 
 
 def create_venv():
