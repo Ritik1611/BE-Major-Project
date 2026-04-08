@@ -340,6 +340,9 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
                 "Check your ASR setup."
             )
         return filtered
+    
+    records = _filter_records(records)
+    return records
 
 def collate_batch(batch):
     input_ids = torch.stack([b["input_ids"] for b in batch], dim=0)
