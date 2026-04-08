@@ -327,39 +327,43 @@ pub async fn serve(
     cfg: Config,
     state: Arc<OrchestratorState>,
 ) -> anyhow::Result<()> {
-
+ 
     let svc = Service {
         state,
         cfg: cfg.clone(),
     };
-
-    let server_identity = Identity::from_pem(
-        std::fs::read(&cfg.tls.server_cert)?,
-        std::fs::read(&cfg.tls.server_key)?,
-    );
-
-    let client_ca = TlsCertificate::from_pem(
-        std::fs::read(&cfg.tls.ca_cert)?,
-    );
-
-    // mTLS: require client certificate for operational RPCs.
-    // Enrollment uses server-TLS only (handled at the RPC level via
-    // require_client_cert which is intentionally permissive for EnrollDevice).
-    let tls = ServerTlsConfig::new()
-        .identity(server_identity);
-
-    tracing::info!("[TLS] TLS ENABLED — mTLS enforced per-RPC");
-
-    let mut builder = Server::builder();
-    builder = builder.tls_config(tls)?;
-
-    tracing::info!("Binding to: {}", cfg.server.addr);
-
-    builder
-        .add_service(OrchestratorServer::new(svc))
-        .serve(cfg.server.addr.parse()?)
-        .await?;
-
+ 
+    let addr = cfg.server.addr.parse()?;
+ 
+    if cfg.server.enable_tls {
+        use tonic::transport::{ServerTlsConfig, Identity};
+ 
+        let server_identity = Identity::from_pem(
+            std::fs::read(&cfg.tls.server_cert)?,
+            std::fs::read(&cfg.tls.server_key)?,
+        );
+ 
+        let tls = ServerTlsConfig::new().identity(server_identity);
+ 
+        tracing::info!("[SERVER] TLS mode — binding to {}", addr);
+        println!("[SERVER] Running in TLS mode");
+ 
+        Server::builder()
+            .tls_config(tls)?
+            .add_service(OrchestratorServer::new(svc))
+            .serve(addr)
+            .await?;
+ 
+    } else {
+        tracing::warn!("[SERVER] INSECURE mode (enable_tls=false) — binding to {}", addr);
+        println!("[SERVER] Running in INSECURE mode — no TLS");
+ 
+        Server::builder()
+            .add_service(OrchestratorServer::new(svc))
+            .serve(addr)
+            .await?;
+    }
+ 
     Ok(())
 }
 
