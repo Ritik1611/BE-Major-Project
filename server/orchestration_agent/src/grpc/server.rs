@@ -61,22 +61,18 @@ impl Orchestrator for Service {
         &self,
         req: Request<EnrollRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
-
-        // Capture peer address BEFORE consuming request
+ 
+        // Get peer address for rate limiting (Phase 8)
         let peer_addr = req
             .remote_addr()
             .map(|a| a.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-
-        // FIX: consume request into inner — then only use req_inner
+ 
         let req_inner = req.into_inner();
-
-        // ── 1. Rate-limited OTP consumption ───────────────────────────────────
+ 
+        // Rate-limited OTP consumption
         if !crate::otp::consume_otp_from(&req_inner.enrollment_token, &peer_addr) {
-            tracing::warn!(
-                "Enrollment rejected for peer {} — invalid/expired OTP",
-                peer_addr
-            );
+            tracing::warn!("Enrollment rejected for peer {} — invalid/expired OTP", peer_addr);
             return Err(Status::permission_denied("invalid or expired OTP"));
         }
 
@@ -350,8 +346,7 @@ pub async fn serve(
     // Enrollment uses server-TLS only (handled at the RPC level via
     // require_client_cert which is intentionally permissive for EnrollDevice).
     let tls = ServerTlsConfig::new()
-        .identity(server_identity)
-        .client_ca_root(client_ca);
+        .identity(server_identity);
 
     tracing::info!("[TLS] TLS ENABLED — mTLS enforced per-RPC");
 

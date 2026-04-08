@@ -1,12 +1,10 @@
 """
 grpc_client.py — Dual channel mTLS implementation
 
-Phase 3:  Two-channel design — enrollment (server-TLS) and operational (mTLS).
-Phase 4:  Server certificate MUST have a Subject Alternative Name (SAN) for
-          the server's IP address. Regenerate with:
-              bash certs/gen_certs.sh <SERVER_IP>
-          then copy certs/ca.pem to installer/runtime/keys/ca.pem and reinstall.
-Phase 9:  Exponential backoff retry on transient gRPC errors.
+Channel 1 (enrollment): server-TLS only (no client cert) — used during install
+Channel 2 (operational): full mTLS (client cert + server cert) — used at runtime
+
+This eliminates the "certificate required" error when no client cert exists yet.
 """
 
 import grpc
@@ -28,29 +26,36 @@ _CA_PEM      = KEYS / "ca.pem"
 _CLIENT_KEY  = KEYS / "client.key"
 _CLIENT_CERT = KEYS / "client.pem"
 
-# Phase 4: Channel options — no hostname override needed when certs have correct SAN.
+# gRPC channel options shared by both channels
 _CHANNEL_OPTIONS = [
-    ("grpc.keepalive_time_ms",              10_000),
-    ("grpc.keepalive_timeout_ms",            5_000),
-    ("grpc.keepalive_permit_without_calls",      1),
-    ("grpc.http2.max_pings_without_data",        0),
+    ("grpc.keepalive_time_ms",          10_000),
+    ("grpc.keepalive_timeout_ms",        5_000),
+    ("grpc.keepalive_permit_without_calls", 1),
+    ("grpc.http2.max_pings_without_data",   0),
+    # Remove override once server cert SAN includes the real IP
+    # If you regenerated certs with correct SAN, delete the next two lines:
+    ("grpc.ssl_target_name_override", "localhost"),
+    ("grpc.default_authority",        "localhost"),
 ]
 
-_MAX_RETRY    = 5
-_RETRY_BASE_S = 1.0
+_MAX_RETRY = 5
+_RETRY_BASE_S = 1.0   # exponential backoff base
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _wait_ready(channel: grpc.Channel, timeout: float = 15.0):
+    """Block until channel is ready or raise."""
     try:
         grpc.channel_ready_future(channel).result(timeout=timeout)
     except grpc.FutureTimeoutError:
-        raise ConnectionError(f"gRPC channel not ready within {timeout}s")
+        raise ConnectionError(
+            f"gRPC channel not ready within {timeout}s"
+        )
 
 
 def _with_retry(fn, *args, **kwargs):
-    """Phase 9: exponential backoff on transient gRPC errors."""
+    """Call fn with exponential backoff on transient errors."""
     last_err = None
     for attempt in range(_MAX_RETRY):
         try:
@@ -61,10 +66,8 @@ def _with_retry(fn, *args, **kwargs):
                 grpc.StatusCode.DEADLINE_EXCEEDED,
             ):
                 wait = _RETRY_BASE_S * (2 ** attempt)
-                log.warning(
-                    "gRPC transient error (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1, _MAX_RETRY, wait, e.details()
-                )
+                log.warning("gRPC transient error (attempt %d/%d), retrying in %.1fs: %s",
+                            attempt + 1, _MAX_RETRY, wait, e.details())
                 time.sleep(wait)
                 last_err = e
             else:
@@ -76,8 +79,8 @@ def _with_retry(fn, *args, **kwargs):
 
 def create_enrollment_channel(server_addr: str) -> grpc.Channel:
     """
-    Phase 3 — Channel 1: server-TLS only (no client certificate).
-    Used during installation when the device does not yet have a signed cert.
+    Server-TLS only channel (no client certificate).
+    Used during installation / first enrollment.
     """
     if not _CA_PEM.exists():
         raise FileNotFoundError(f"CA certificate not found: {_CA_PEM}")
@@ -87,20 +90,21 @@ def create_enrollment_channel(server_addr: str) -> grpc.Channel:
     )
     channel = grpc.secure_channel(server_addr, creds, options=_CHANNEL_OPTIONS)
     _wait_ready(channel)
-    log.info("[gRPC] Enrollment channel ready -> %s", server_addr)
+    log.info("[gRPC] Enrollment channel ready → %s", server_addr)
     return channel
 
 
 def create_mtls_channel(server_addr: str) -> grpc.Channel:
     """
-    Phase 3 — Channel 2: full mutual TLS (client cert + server cert).
-    Used for all operational calls after device enrollment.
+    Full mTLS channel (client cert + server cert).
+    Used for operational calls after enrollment.
+    Raises FileNotFoundError if client cert not yet installed.
     """
     for p in [_CA_PEM, _CLIENT_KEY, _CLIENT_CERT]:
         if not p.exists():
             raise FileNotFoundError(
                 f"mTLS credential missing: {p}\n"
-                "Run the installer to enroll this device first."
+                "Run the installer first to enroll this device."
             )
 
     creds = grpc.ssl_channel_credentials(
@@ -110,37 +114,43 @@ def create_mtls_channel(server_addr: str) -> grpc.Channel:
     )
     channel = grpc.secure_channel(server_addr, creds, options=_CHANNEL_OPTIONS)
     _wait_ready(channel)
-    log.info("[gRPC] mTLS channel ready -> %s", server_addr)
+    log.info("[gRPC] mTLS channel ready → %s", server_addr)
     return channel
 
 
 def create_grpc_stub(server_addr: str) -> OrchestratorStub:
     """
     Create the operational mTLS stub.
-    Falls back to enrollment channel gracefully when client cert is absent.
+    Falls back to enrollment channel if client cert is missing
+    (graceful for first-run scenarios).
     """
     try:
         channel = create_mtls_channel(server_addr)
-        log.info("[gRPC] Using full mutual TLS")
+        log.info("[gRPC] Using mTLS (full mutual TLS)")
     except FileNotFoundError as e:
-        log.warning("[gRPC] Client cert absent, falling back to server-TLS: %s", e)
+        log.warning("[gRPC] Client cert missing, falling back to server-TLS: %s", e)
         try:
             channel = create_enrollment_channel(server_addr)
-            log.warning("[gRPC] Using server-TLS only — enroll this device first")
+            log.warning("[gRPC] Using server-TLS only (enroll this device first)")
         except Exception as inner:
             trigger_self_destruct(f"Cannot establish any gRPC channel: {inner}")
 
     stub = OrchestratorStub(channel)
-    stub._sign_message = sign_message
+    stub._sign_message = sign_message   # attach TPM signer for use in pipeline
     return stub
 
 
 def enrollment_stub(server_addr: str) -> OrchestratorStub:
-    """Explicit enrollment-only stub (called from installer)."""
+    """
+    Explicit enrollment-only stub (called from installer).
+    """
     channel = create_enrollment_channel(server_addr)
     return OrchestratorStub(channel)
 
 
 def call_with_retry(rpc_fn, request, timeout: float = 30.0):
-    """Phase 9: wrap any gRPC call with retry + timeout."""
+    """
+    Wrap any gRPC call with retry + timeout.
+    Usage: call_with_retry(stub.SubmitReceipt, receipt_msg, timeout=15)
+    """
     return _with_retry(rpc_fn, request, timeout=timeout)

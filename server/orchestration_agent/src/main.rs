@@ -30,11 +30,10 @@ async fn main() -> anyhow::Result<()> {
     // FIX: was importing `use crate::otp::generate_otp` but calling it via the
     // full path anyway — removed the redundant import to silence the warning.
     let otp = crate::otp::generate_otp();
-
-    // Keep the enrollment_tokens map in sync for any code that reads it directly.
+    // Note: enrollment_tokens map is no longer needed — OTP_STORE handles it internally
+    // Keep the insert for backward compat with SubmitReceipt code that reads it:
     state.enrollment_tokens.insert(otp.clone(), ());
-
-    println!("[ENROLLMENT] OTP: {} (valid for 50 minutes)", otp);
+    println!("[DEV] Enrollment OTP: {} (valid for 60 seconds)", otp);
     tracing::info!("Enrollment OTP generated — valid 50 minutes");
 
     // ── 5. Start background systems ───────────────────────────────────────────
