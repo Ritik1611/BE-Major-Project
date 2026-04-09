@@ -43,7 +43,7 @@ from installer.security.integrity import integrity_guard
 integrity_guard()
 
 # ---------- Config / Defaults ----------
-MENTALBERT_PRETRAIN = "mental/mental-bert-base-uncased"
+MENTALBERT_PRETRAIN = str(Path.home() / ".federated" / "models" / "mentalbert")
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 LOCAL_SAVE_DIR = Path.home() / ".federated" / "data" / "secure_store"
 LOCAL_SAVE_DIR.mkdir(parents=True, exist_ok=True)

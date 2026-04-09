@@ -52,6 +52,24 @@ def _chmod_tree(root: Path):
 # --------------------------------------------------
 # Windows dependency installer
 # --------------------------------------------------
+def install_mentalbert_model():
+    BASE = Path.home() / ".federated"
+    MODEL_DST = BASE / "models" / "mentalbert"
+    MODEL_SRC = RUNTIME_SRC / "models" / "mentalbert"   # 👈 bundled inside installer
+
+    print(f"[MODEL] Installing MentalBERT → {MODEL_DST}")
+
+    if MODEL_DST.exists():
+        print("[MODEL] Already exists, skipping")
+        return
+
+    if not MODEL_SRC.exists():
+        raise RuntimeError(f"MentalBERT model not found in installer at {MODEL_SRC}")
+
+    shutil.copytree(MODEL_SRC, MODEL_DST)
+
+    print("[OK] MentalBERT model installed")
+
 
 def install_windows_deps():
     if platform.system().lower() != "windows":
@@ -241,5 +259,7 @@ def install_runtime():
         print("[OK] installer.security module installed")
     else:
         print("[WARN] installer/security not found in installer package")
+
+    install_mentalbert_model()
 
     print("[OK] Runtime installed successfully")
