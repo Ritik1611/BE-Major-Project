@@ -52,7 +52,7 @@ class AggregatorAgent:
             raw = store.decrypt_read("file://" + enc_path)
 
             try:
-                return torch.load(io.BytesIO(raw))
+                return np.frombuffer(raw, dtype=np.float32)
             except Exception:
                 return np.frombuffer(raw, dtype=np.float32)
 
@@ -90,8 +90,10 @@ class AggregatorAgent:
             else:
                 raise TypeError(f"Unsupported decrypted type: {type(t)}")
 
-        arr = np.stack(decrypted, axis=0)
-        return self._apply_aggregation(arr)
+        shapes = [d.shape for d in decrypted]
+        if len(set(shapes)) != 1:
+            raise ValueError(f"Inconsistent update shapes: {shapes}")
+        return self._apply_aggregation(shapes)
 
     # ------------------------------------------------------------------
     # Robust aggregation methods
