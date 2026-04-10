@@ -12,6 +12,7 @@ import time
 import logging
 from pathlib import Path
 from typing import Optional
+from __future__ import annotations
 
 from runtime.tpm_guard import sign_message
 from runtime.self_destruct import trigger_self_destruct
@@ -44,7 +45,7 @@ _RETRY_BASE_S = 1.0   # exponential backoff base
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _wait_ready(channel: grpc.Channel, timeout: float = 15.0):
+def _wait_ready(channel, timeout: float = 15.0):
     """Block until channel is ready or raise."""
     try:
         grpc.channel_ready_future(channel).result(timeout=timeout)
