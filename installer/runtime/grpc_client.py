@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 grpc_client.py — Dual channel mTLS implementation
 
@@ -12,7 +13,6 @@ import time
 import logging
 from pathlib import Path
 from typing import Optional
-from __future__ import annotations
 
 from runtime.tpm_guard import sign_message
 from runtime.self_destruct import trigger_self_destruct
