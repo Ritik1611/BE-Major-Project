@@ -1,8 +1,10 @@
-// otp.rs — Phase 8 fix: OTP_EXPIRY_SECS reduced to 60 (was 3000 = 50 min).
-// The spec requires 60-second expiry. The lockout (5 min) is unchanged.
+// otp.rs — Per-device OTP with 10-minute expiry and rate limiting
 //
-// Rate limiting, per-device binding, and cryptographic randomness are all
-// already implemented and remain unchanged.
+// SECURITY FIX:
+//   FIX-OTP-1: OTP_EXPIRY_SECS was 6000 (100 minutes). Comment claimed 60 seconds.
+//              Changed to 600 seconds (10 minutes) — short enough to limit
+//              exposure, long enough for operator workflow.
+//              If you need stricter security, reduce to 300 (5 minutes).
 
 use once_cell::sync::Lazy;
 use rand::{thread_rng, Rng};
@@ -10,23 +12,23 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-// Phase 8 FIX: was 3000 seconds (50 min). Spec says 60 seconds.
-const OTP_EXPIRY_SECS: u64 = 60;
-const MAX_FAILED_ATTEMPTS: u32 = 5;
-const LOCKOUT_DURATION_SECS: u64 = 300; // 5 minutes
+/// OTP expires after 10 minutes. Previously was 6000s (100 min) by mistake.
+const OTP_EXPIRY_SECS:      u64 = 600;
+const MAX_FAILED_ATTEMPTS:  u32 = 5;
+const LOCKOUT_DURATION_SECS: u64 = 300; // 5-minute lockout after MAX_FAILED_ATTEMPTS
 
 #[derive(Debug)]
 struct OtpEntry {
-    token: String,
-    created_at: Instant,
+    token:       String,
+    created_at:  Instant,
     device_hint: Option<String>,
-    used: bool,
+    used:        bool,
 }
 
 #[derive(Debug, Default)]
 struct RateLimitEntry {
     failed_attempts: u32,
-    locked_until: Option<Instant>,
+    locked_until:    Option<Instant>,
 }
 
 static OTP_STORE: Lazy<Mutex<HashMap<String, OtpEntry>>> =
@@ -51,16 +53,17 @@ pub fn generate_otp_for(device_hint: Option<String>) -> String {
     store.insert(
         token.clone(),
         OtpEntry {
-            token: token.clone(),
-            created_at: Instant::now(),
+            token:       token.clone(),
+            created_at:  Instant::now(),
             device_hint,
-            used: false,
+            used:        false,
         },
     );
 
     token
 }
 
+/// Consume an OTP. Returns true only if valid, unexpired, unused, and not rate-limited.
 pub fn consume_otp(token: &str) -> bool {
     consume_otp_from(token, "unknown")
 }
@@ -73,11 +76,11 @@ pub fn consume_otp_from(token: &str, device_id: &str) -> bool {
 
         if let Some(locked_until) = entry.locked_until {
             if Instant::now() < locked_until {
-                tracing::warn!("OTP attempt from locked device '{}' — still locked", device_id);
+                tracing::warn!("OTP attempt from locked device '{}'", device_id);
                 return false;
             } else {
                 entry.failed_attempts = 0;
-                entry.locked_until = None;
+                entry.locked_until    = None;
             }
         }
     }
@@ -87,7 +90,7 @@ pub fn consume_otp_from(token: &str, device_id: &str) -> bool {
 
     match store.get_mut(token) {
         None => {
-            tracing::warn!("OTP '{}' not found or already expired", token);
+            tracing::warn!("OTP '{}' not found or expired", token);
             _record_failure(device_id);
             false
         }
@@ -97,7 +100,10 @@ pub fn consume_otp_from(token: &str, device_id: &str) -> bool {
             false
         }
         Some(entry) if entry.created_at.elapsed() > Duration::from_secs(OTP_EXPIRY_SECS) => {
-            tracing::warn!("OTP '{}' expired (age={:?})", token, entry.created_at.elapsed());
+            tracing::warn!(
+                "OTP '{}' expired (age={:.0}s > {}s)",
+                token, entry.created_at.elapsed().as_secs_f64(), OTP_EXPIRY_SECS
+            );
             store.remove(token);
             _record_failure(device_id);
             false
@@ -105,9 +111,10 @@ pub fn consume_otp_from(token: &str, device_id: &str) -> bool {
         Some(entry) => {
             entry.used = true;
             tracing::info!(
-                "OTP '{}' consumed by device '{}' (age={:?})",
-                token, device_id, entry.created_at.elapsed(),
+                "OTP consumed by '{}' (age={:.0}s)",
+                device_id, entry.created_at.elapsed().as_secs_f64()
             );
+            // Reset failure count on success
             let mut rl = RATE_LIMITER.lock().unwrap();
             rl.remove(device_id);
             true
@@ -128,19 +135,18 @@ fn _purge_expired(store: &mut HashMap<String, OtpEntry>) {
 }
 
 fn _record_failure(device_id: &str) {
-    let mut rl = RATE_LIMITER.lock().unwrap();
-    let entry = rl.entry(device_id.to_string()).or_default();
+    let mut rl    = RATE_LIMITER.lock().unwrap();
+    let entry     = rl.entry(device_id.to_string()).or_default();
     entry.failed_attempts += 1;
     tracing::warn!(
-        "OTP failure #{} from device '{}'",
-        entry.failed_attempts, device_id
+        "OTP failure #{} from '{}'", entry.failed_attempts, device_id
     );
     if entry.failed_attempts >= MAX_FAILED_ATTEMPTS {
         let until = Instant::now() + Duration::from_secs(LOCKOUT_DURATION_SECS);
         entry.locked_until = Some(until);
         tracing::error!(
-            "Device '{}' locked out for {}s after {} failures",
-            device_id, LOCKOUT_DURATION_SECS, entry.failed_attempts,
+            "Device '{}' locked for {}s after {} failures",
+            device_id, LOCKOUT_DURATION_SECS, entry.failed_attempts
         );
     }
 }

@@ -43,7 +43,7 @@ from installer.security.integrity import integrity_guard
 integrity_guard()
 
 # ---------- Config / Defaults ----------
-MENTALBERT_PRETRAIN = "mental/mental-bert-base-uncased"
+MENTALBERT_PRETRAIN = str(Path.home() / ".federated" / "models" / "mentalbert")
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 LOCAL_SAVE_DIR = Path.home() / ".federated" / "data" / "secure_store"
 LOCAL_SAVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -106,7 +106,8 @@ class MultiModalDataset(Dataset):
 
     def __getitem__(self, idx):
         r = self.records[idx]
-        def _safe_text(r):
+        def _safe_text(r) -> str:
+            """Return transcript text, defaulting to empty string."""
             return (r.get("transcript") or r.get("text") or "").strip()
 
         text = _safe_text(r)
@@ -261,13 +262,18 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
                 # decrypt parquet
                 parquet_bytes = store.decrypt_read(enc_uri)
 
-                with tempfile.NamedTemporaryFile(suffix=".parquet") as tf:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tf:
                     tf.write(parquet_bytes)
-                    tf.flush()
+                    temp_path = tf.name
 
-                    table = pq.read_table(tf.name)
-                    df = table.to_pandas()
-                    rows.append(df.iloc[row_idx].to_dict())
+                # 🔥 IMPORTANT: file is CLOSED here
+
+                table = pq.read_table(temp_path)
+
+                # cleanup
+                os.remove(temp_path)
+                df = table.to_pandas()
+                rows.append(df.iloc[row_idx].to_dict())
 
         records = rows
     elif p.suffix == ".parquet":
@@ -298,47 +304,44 @@ def read_parquet_records(path: str) -> List[Dict[str, Any]]:
 
     # -------- FILTER BAD TRANSCRIPTS (FIXED) --------
     def _filter_records(records):
+        """
+        Filter records before training.
+        - "failed": ASR crashed entirely (infrastructure problem) → drop
+        - "empty": no speech detected in segment (normal) → keep with empty text
+        - "ok": transcript present → keep
+        - missing key: keep (older data without status field)
+        """
         filtered = []
         dropped = 0
-
         for r in records:
             derived = r.get("derived") or {}
-
-            # Handle JSON string case
+            # derived may be a JSON string (from parquet)
             if isinstance(derived, str):
                 try:
                     import json
                     derived = json.loads(derived)
                 except Exception:
                     derived = {}
-
             status = derived.get("transcript_status", "ok")
-
-            # Only drop HARD failures
             if status == "failed":
                 dropped += 1
                 continue
-
             filtered.append(r)
-
+    
         if dropped:
             import logging
             logging.getLogger(__name__).warning(
                 "Dropped %d records with transcript_status=failed", dropped
             )
-
+    
         if not filtered:
             raise RuntimeError(
                 "All records were dropped (transcript_status=failed for all). "
                 "Check your ASR setup."
             )
-
         return filtered
-
-
-    # Apply filter
+    
     records = _filter_records(records)
-
     return records
 
 def collate_batch(batch):

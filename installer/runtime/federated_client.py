@@ -1,32 +1,93 @@
 #!/usr/bin/env python3
 """
-federated_client.py — Main entry point for the federated learning client.
+federated_client.py — Main entry point.
 
-Phases integrated here:
-  Phase 3:  Dual-channel mTLS (create_grpc_stub)
-  Phase 5:  Continuous daemon (daemon_loop with capture)
-  Phase 7:  IntegrityWatcher background thread
-  Phase 9:  gRPC retry (via call_with_retry in pipeline)
-  Phase 11: Structured logging + metrics + health reporting
+FIXES IN THIS VERSION:
+  FIX-A: Removed str(BASE / "runtime") from sys.path.
+          Adding ~/.federated/runtime to sys.path caused Python to find
+          the local ~/.federated/runtime/grpc/ directory when doing
+          `import grpc`, shadowing the real grpcio package and producing:
+              AttributeError: module 'grpc' has no attribute 'ssl_channel_credentials'
+          All runtime.* imports already work correctly with only BASE on
+          sys.path because `runtime` is a package (has __init__.py) inside BASE.
+
+  FIX-B: Removed str(BASE / "core") from sys.path for the same reason —
+          it is not needed since `from core.X import Y` resolves correctly
+          via BASE being on sys.path (core is a package inside BASE).
+
+  FIX-C: Platform-aware VENV_PYTHON path (Windows vs Linux).
+
+  FIX-D: Creates __init__.py files for runtime, installer, runtime/grpc
+          packages on first run to ensure imports resolve.
 """
 
 import sys
+import platform
 from pathlib import Path
 
-# ── Ensure .federated is on PYTHONPATH ───────────────────────────────────────
-BASE = Path(__file__).resolve().parent.parent   # ~/.federated
-VENV_PYTHON = BASE / "venv" / "Scripts" / "python.exe"
+IS_WINDOWS = platform.system().lower() == "windows"
 
+# ── Locate ~/.federated ───────────────────────────────────────────────────────
+# federated-client lives at ~/.federated/bin/federated-client
+# parent = ~/.federated/bin, parent.parent = ~/.federated
+BASE = Path(__file__).resolve().parent.parent   # ~/.federated
+
+# FIX-C: platform-aware venv python path
+if IS_WINDOWS:
+    VENV_PYTHON = BASE / "venv" / "Scripts" / "python.exe"
+else:
+    VENV_PYTHON = BASE / "venv" / "bin" / "python"
+
+# ── Redirect into venv if not already running inside it ───────────────────────
 if Path(sys.executable).resolve() != VENV_PYTHON.resolve() and VENV_PYTHON.exists():
     import subprocess
-    subprocess.run([str(VENV_PYTHON), __file__, *sys.argv[1:]])
-    sys.exit(0)
+    result = subprocess.run([str(VENV_PYTHON), __file__, *sys.argv[1:]])
+    sys.exit(result.returncode)
 
-for extra in [str(BASE), str(BASE / "bin"), str(BASE / "installer")]:
-    if extra not in sys.path:
-        sys.path.insert(0, extra)
+# ── Build sys.path ────────────────────────────────────────────────────────────
+# FIX-A/B: Only add BASE and BASE/installer.
+# DO NOT add BASE/runtime — it contains a `grpc/` subdirectory that would
+# shadow the real grpcio `grpc` package, breaking ssl_channel_credentials.
+# DO NOT add BASE/core — same reasoning (unnecessary and risky).
+# `from runtime.X import Y` works fine with BASE on the path because
+# BASE/runtime/ is a Python package (has __init__.py).
+_PATH_EXTRAS = [
+    str(BASE),               # enables: runtime.*, agents.*, core.*
+    str(BASE / "installer"), # enables: installer.security.*
+    str(BASE / "bin"),
+]
+for _extra in _PATH_EXTRAS:
+    if _extra not in sys.path:
+        sys.path.insert(0, _extra)
 
-# ── Phase 11: logging FIRST ──────────────────────────────────────────────────
+# ── Ensure package __init__.py files exist ────────────────────────────────────
+# FIX-D: Without these, Python treats the directories as namespace packages
+# and relative/absolute imports inside them may fail unpredictably.
+
+def _ensure_init(pkg_path: Path):
+    """Write an empty __init__.py if the directory exists and lacks one."""
+    if pkg_path.is_dir():
+        init = pkg_path / "__init__.py"
+        if not init.exists():
+            try:
+                init.write_text("")
+                init.chmod(0o600)
+            except Exception:
+                pass
+
+_ensure_init(BASE / "runtime")
+_ensure_init(BASE / "runtime" / "grpc")
+_ensure_init(BASE / "installer")
+_ensure_init(BASE / "installer" / "security")
+_ensure_init(BASE / "core")
+_ensure_init(BASE / "agents")
+_ensure_init(BASE / "agents" / "lda")
+_ensure_init(BASE / "agents" / "lda" / "pipelines")
+_ensure_init(BASE / "agents" / "trainer")
+_ensure_init(BASE / "agents" / "dp")
+_ensure_init(BASE / "agents" / "enc")
+
+# ── Phase 11: logging FIRST ───────────────────────────────────────────────────
 from runtime.logging_config import setup_logging, MetricsCollector, HealthReporter
 setup_logging(level="INFO")
 
@@ -42,7 +103,7 @@ from runtime.grpc_client import create_grpc_stub, call_with_retry
 from runtime.pipeline import run_pipeline
 from runtime.tpm_guard import get_device_pubkey
 from runtime.daemon import daemon_loop
-from security.integrity import IntegrityWatcher
+from installer.security.integrity import IntegrityWatcher
 
 log = logging.getLogger("federated_client")
 
@@ -66,13 +127,13 @@ def main():
 
     log.info("Federated client starting (mode=%s)", mode)
 
-    # ── Phase 7: start integrity watcher ────────────────────────────────────
+    # ── Phase 7: start integrity watcher ─────────────────────────────────────
     watcher = IntegrityWatcher(interval_s=300, max_violations=2)
     watcher.start()
     log.info("Integrity watcher started")
 
     try:
-        # ── Runtime security gate ────────────────────────────────────────────
+        # ── Runtime security gate ─────────────────────────────────────────────
         master_secret = runtime_guard()
         device_pubkey = get_device_pubkey()
         if not device_pubkey:
@@ -82,12 +143,12 @@ def main():
 
         device_id = hashlib.sha256(device_pubkey).digest()
 
-        # ── Server address ───────────────────────────────────────────────────
+        # ── Server address ────────────────────────────────────────────────────
         SERVER_ADDR = os.environ.get("FED_SERVER")
         if not SERVER_ADDR:
             SERVER_ADDR = input("Enter server address (host:port): ").strip()
 
-        # ── Phase 3: dual-channel gRPC ───────────────────────────────────────
+        # ── Phase 3: dual-channel gRPC ────────────────────────────────────────
         stub = create_grpc_stub(SERVER_ADDR)
 
         # Register device (best-effort; may already be registered)
@@ -98,7 +159,7 @@ def main():
 
         health.healthy(server=SERVER_ADDR)
 
-        # ── Dispatch mode ────────────────────────────────────────────────────
+        # ── Dispatch mode ─────────────────────────────────────────────────────
         if mode in ("run-once", "run_once"):
             metrics.record_attempt()
             t0 = time.time()
