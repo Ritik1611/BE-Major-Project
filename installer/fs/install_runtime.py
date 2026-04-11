@@ -343,7 +343,7 @@ def install_runtime():
     if getattr(sys, "frozen", False):
         base = Path(sys._MEIPASS)
     else:
-        base = Path(__file__).resolve().parent
+        base = Path(__file__).resolve().parents[1]
 
     ca_src = base / "runtime" / "keys" / "ca.pem"
     ca_dst = KEYS_DIR / "ca.pem"
