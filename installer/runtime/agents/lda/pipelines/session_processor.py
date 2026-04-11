@@ -2,11 +2,22 @@
 session_processor.py — Fixed version
 
 Key fixes:
-  1. .env loaded from __file__'s directory (not CWD)
-  2. ASR fallback: uses asr_hf_model (HF model ID) not asr_model (whisper name)
-  3. Records with failed transcripts get status="empty" not "failed" so trainer
-     doesn't discard everything when ASR is unavailable
-  4. All subprocess calls use CREATE_NO_WINDOW only on Windows
+  FIX-1: _safe_import() now LOGS the exception instead of silently swallowing it.
+          Previously, if openai-whisper failed to import (missing tiktoken, numba
+          DLL error, etc. on Windows) _whisper was silently set to None and the
+          code fell through to the HF transformers fallback with no indication why.
+          Now the log clearly says e.g.:
+            "WARNING: Failed to import whisper: No module named 'tiktoken'"
+          which tells you exactly what to fix.
+
+  FIX-2: _transcribe_segment_with_backends() now logs an explicit WARNING when
+          backend="whisper" is configured but openai-whisper is not available,
+          so the fallback activation is visible in the log rather than silent.
+
+  FIX-3: .env loaded from __file__'s directory (not CWD) — unchanged from prev.
+  FIX-4: ASR fallback uses asr_hf_model (HF model ID) not asr_model — unchanged.
+  FIX-5: Records with failed transcripts get status="empty" — unchanged.
+  FIX-6: All subprocess calls use CREATE_NO_WINDOW only on Windows — unchanged.
 """
 
 import json
@@ -30,9 +41,9 @@ try:
     if _ENV_FILE.exists():
         load_dotenv(_ENV_FILE)
     else:
-        load_dotenv()          # fallback: search CWD upward
+        load_dotenv()
 except ImportError:
-    pass                       # python-dotenv not installed, skip
+    pass
 
 from core.centralized_secure_store import SecureStore
 from core.centralised_receipts import CentralReceiptManager
@@ -42,7 +53,8 @@ logging.basicConfig(level=logging.INFO)
 
 IS_WINDOWS = platform.system().lower() == "windows"
 
-# ── subprocess helper: only pass CREATE_NO_WINDOW on Windows ─────────────────
+
+# ── subprocess helper ─────────────────────────────────────────────────────────
 def _popen_kwargs(extra: dict = None) -> dict:
     kw = {"capture_output": True, "text": True}
     if IS_WINDOWS:
@@ -52,12 +64,24 @@ def _popen_kwargs(extra: dict = None) -> dict:
     return kw
 
 
-# ── Optional lib imports ──────────────────────────────────────────────────────
+# ── FIX-1: _safe_import now LOGS failures instead of silently swallowing them ─
 def _safe_import(name: str):
+    """
+    Import a module by name.  Returns the module on success, None on failure.
+
+    IMPORTANT: failures are now logged at WARNING level so you can see exactly
+    why a dependency is unavailable (e.g. missing tiktoken, numba DLL error).
+    """
     try:
         import importlib
         return importlib.import_module(name)
-    except Exception:
+    except Exception as e:
+        log.warning(
+            "Optional dependency '%s' could not be imported — "
+            "related features will use fallback implementations. "
+            "Reason: %s: %s",
+            name, type(e).__name__, e
+        )
         return None
 
 
@@ -65,10 +89,19 @@ def _which(cmd: str) -> Optional[str]:
     return shutil.which(cmd)
 
 
+# ── Optional lib imports ──────────────────────────────────────────────────────
 _librosa     = _safe_import("librosa")
 _webrtcvad   = _safe_import("webrtcvad")
 _pyannote    = _safe_import("pyannote.audio")
-_whisper     = _safe_import("whisper")          # openai-whisper (NOT transformers)
+
+# openai-whisper imports as the module named "whisper".
+# On Windows, common reasons it fails to import:
+#   • tiktoken not installed / build failed (requires Rust toolchain or pre-built wheel)
+#   • numba DLL load error (needs specific Visual C++ runtime)
+#   • torch not on PATH at import time
+# If any of these apply you will now see a WARNING in the log with the exact error.
+_whisper     = _safe_import("whisper")
+
 _transformers = _safe_import("transformers")
 _torch       = _safe_import("torch")
 _mediapipe   = _safe_import("mediapipe")
@@ -131,7 +164,6 @@ def _cut_video_segment(input_video: str, out_video: str, start: float, end: floa
     kw = _popen_kwargs()
     proc = subprocess.run(cmd, **kw)
     if proc.returncode != 0:
-        # re-encode fallback
         cmd2 = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-ss", str(start), "-t", str(duration),
@@ -141,7 +173,7 @@ def _cut_video_segment(input_video: str, out_video: str, start: float, end: floa
         ]
         proc2 = subprocess.run(cmd2, **kw)
         if proc2.returncode != 0:
-            raise RuntimeError(f"ffmpeg cut video failed")
+            raise RuntimeError("ffmpeg cut video failed")
     return str(out_path)
 
 
@@ -286,7 +318,6 @@ def _diarize_audio(audio_wav: str, cfg: dict) -> List[Dict[str, Any]]:
         except Exception as e:
             log.warning("pyannote diarization failed: %s", e)
 
-    # Fallback: VAD segments with alternating speakers
     vad_segs = _run_vad(audio_wav, cfg)
     result = []
     for idx, seg in enumerate(vad_segs):
@@ -299,29 +330,26 @@ def _diarize_audio(audio_wav: str, cfg: dict) -> List[Dict[str, Any]]:
 
 
 # ── ASR ───────────────────────────────────────────────────────────────────────
-# CRITICAL FIX: separate whisper model names from HF model IDs
 
 def _get_asr_models(cfg: dict) -> Tuple[str, str]:
     """
     Returns (whisper_model_name, hf_model_id).
-    whisper_model_name: e.g. "small" — only valid for openai-whisper package
-    hf_model_id:        e.g. "openai/whisper-small" — valid HF Hub identifier
+    whisper_model_name: short name like "small" — for openai-whisper package
+    hf_model_id:        full HF Hub ID like "openai/whisper-small" — for transformers
     """
     text_cfg = cfg.get("text_pipe", {})
     ingest_cfg = cfg.get("ingest", {}).get("text", {})
 
-    # whisper model (short name)
     whisper_model = (
         text_cfg.get("asr_model")
         or ingest_cfg.get("asr_model")
         or "small"
     )
 
-    # HF model ID (full qualified name)
     hf_model = (
         text_cfg.get("asr_hf_model")
         or ingest_cfg.get("asr_hf_model")
-        or f"openai/whisper-{whisper_model}"   # derive from whisper name
+        or f"openai/whisper-{whisper_model}"
     )
 
     return whisper_model, hf_model
@@ -370,7 +398,14 @@ def _transcribe_segment_with_backends(audio_wav: str,
                                        cfg: dict) -> Tuple[str, float]:
     """
     Cut segment → transcribe with best available backend.
-    Returns (transcript, confidence).
+
+    FIX-2: When backend="whisper" is configured but openai-whisper is not
+    available, we now log an explicit WARNING before falling back, so it is
+    visible in the log why transcript quality is lower than expected.
+
+    To fix the root cause (why openai-whisper is unavailable), check the log
+    for the WARNING emitted by _safe_import("whisper") at startup — it will
+    show the exact import error (e.g. missing tiktoken, numba DLL, etc.).
     """
     whisper_model, hf_model = _get_asr_models(cfg)
     backend = cfg.get("text_pipe", {}).get("asr_backend", "whisper")
@@ -381,23 +416,43 @@ def _transcribe_segment_with_backends(audio_wav: str,
             tmpf = tf.name
         _cut_audio_segment(audio_wav, tmpf, start, end)
 
-        # Primary path
-        if backend == "whisper" and _whisper:
-            return _transcribe_with_whisper_pkg(tmpf, whisper_model)
+        # ── Primary: openai-whisper package ───────────────────────────────────
+        if backend == "whisper":
+            if _whisper:
+                return _transcribe_with_whisper_pkg(tmpf, whisper_model)
+            else:
+                # FIX-2: log that we are falling back so the user understands
+                # why transcript quality may be lower than expected.
+                log.warning(
+                    "ASR backend is configured as 'whisper' but the openai-whisper "
+                    "package could not be imported (see startup log for the exact "
+                    "import error). Falling back to HF transformers pipeline with "
+                    "model='%s'. Transcript quality will be lower. "
+                    "To fix: pip install openai-whisper (may need tiktoken, numba).",
+                    hf_model,
+                )
 
-        if backend == "hf" and _transformers:
-            return _transcribe_with_hf_pipeline(tmpf, hf_model)
+        # ── Primary: HF transformers pipeline ────────────────────────────────
+        if backend == "hf":
+            if _transformers:
+                return _transcribe_with_hf_pipeline(tmpf, hf_model)
+            else:
+                log.warning(
+                    "ASR backend is configured as 'hf' but transformers could not "
+                    "be imported. No ASR backend available."
+                )
 
-        # Fallback path (backend="whisper" but whisper package missing → try HF)
+        # ── Fallback: try openai-whisper first, then HF ───────────────────────
         if _whisper:
             return _transcribe_with_whisper_pkg(tmpf, whisper_model)
 
         if _transformers:
-            # CRITICAL: use hf_model_id (e.g. "openai/whisper-small"), NOT "small"
-            log.info("ASR fallback: using HF pipeline with model=%s", hf_model)
             return _transcribe_with_hf_pipeline(tmpf, hf_model)
 
-        log.warning("No ASR backend available (install openai-whisper or transformers)")
+        log.warning(
+            "No ASR backend available. Install openai-whisper: "
+            "pip install openai-whisper"
+        )
         return "", 0.0
 
     except Exception as e:
@@ -414,10 +469,6 @@ def _transcribe_segment_with_backends(audio_wav: str,
 def _transcribe_segments(audio_wav: str,
                           segments: List[Dict[str, Any]],
                           cfg: dict) -> Dict[Tuple[float, float], Tuple[str, float, str]]:
-    """
-    Transcribe all segments. Returns {(start, end): (text, confidence, status)}.
-    status ∈ {"ok", "empty", "failed"}  (no longer "missing" — avoids trainer filter)
-    """
     transcripts: Dict[Tuple[float, float], Tuple[str, float, str]] = {}
     asr_enabled = cfg.get("text_pipe", {}).get("asr_enabled", False)
 
@@ -606,9 +657,6 @@ def process_session_file(
     mode: str,
     roles: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[str]]:
-    """
-    Returns (rows, artifacts, receipt_uris).
-    """
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     artifacts: Dict[str, Any] = {}
@@ -737,7 +785,6 @@ def process_session_file(
         }
         rows.append(row)
 
-        # per-segment receipt
         try:
             receipt = receipt_mgr.create_receipt(
                 agent="lda",
