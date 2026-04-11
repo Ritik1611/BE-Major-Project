@@ -1,20 +1,66 @@
 syntax = "proto3";
 package orchestrator;
 
+// SECURITY FIXES:
+//   - UploadUpdate: client now streams encrypted model bytes to server.
+//     Previously enc_uri was a local file path the server could never read.
+//   - DownloadGlobalModel: server streams global model back to client.
+//   - UpdateChunk includes per-chunk SHA-256 so server verifies integrity
+//     of each chunk as it arrives (detects corruption/tampering in transit).
+//   - Receipt.enc_handle replaces enc_uri — it is the server-side GridFS
+//     ObjectId returned by UploadAck, NOT a local file path.
+//   - epsilon_spent must now come from the real RDP accountant.
+
 service Orchestrator {
-  rpc RegisterDevice (CSR) returns (Certificate);
-  rpc GetRound (DeviceId) returns (RoundMetadata);
-  rpc SubmitReceipt (Receipt) returns (Ack);
+  rpc RegisterDevice       (CSR)                      returns (Certificate);
+  rpc RequestEnrollment    (EnrollmentRequest)         returns (EnrollmentRequestAck);
+  rpc EnrollDevice         (EnrollRequest)             returns (EnrollResponse);
+  rpc GetRound             (DeviceId)                  returns (RoundMetadata);
 
-  // Phase 1 of enrollment: client announces itself; server generates a
-  // per-device OTP and prints it to the admin console.  No OTP is needed
-  // to call this RPC — only device_pubkey and csr.
-  rpc RequestEnrollment (EnrollmentRequest) returns (EnrollmentRequestAck);
+  // Step 1: stream encrypted update bytes to server BEFORE submitting receipt
+  rpc UploadUpdate         (stream UpdateChunk)        returns (UploadAck);
 
-  // Phase 2 of enrollment: client submits the OTP obtained out-of-band
-  // from the administrator.  Server verifies OTP, signs CSR, returns cert.
-  rpc EnrollDevice (EnrollRequest) returns (EnrollResponse);
+  // Step 2: submit receipt AFTER upload succeeds
+  rpc SubmitReceipt        (Receipt)                   returns (Ack);
+
+  // Server streams global aggregated model to client at round start
+  rpc DownloadGlobalModel  (RoundRequest)              returns (stream ModelChunk);
 }
+
+// ── Upload streaming ──────────────────────────────────────────────────────────
+
+message UpdateChunk {
+  string  session_id   = 1;   // client-generated correlation ID
+  uint64  round_id     = 2;
+  bytes   device_id    = 3;   // SHA-256 of device pubkey
+  uint64  chunk_index  = 4;   // 0-based, must be sequential
+  uint64  total_chunks = 5;   // server validates count at end
+  bytes   data         = 6;   // encrypted update bytes for this chunk
+  bytes   chunk_hash   = 7;   // SHA-256(data) — server verifies each chunk
+}
+
+message UploadAck {
+  bool   ok            = 1;
+  string server_handle = 2;   // GridFS ObjectId — put this in Receipt.enc_handle
+  string error         = 3;
+}
+
+// ── Global model download ─────────────────────────────────────────────────────
+
+message RoundRequest {
+  bytes  device_id = 1;
+  uint64 round_id  = 2;
+}
+
+message ModelChunk {
+  uint64 chunk_index  = 1;
+  uint64 total_chunks = 2;
+  bytes  data         = 3;
+  bytes  chunk_hash   = 4;   // SHA-256(data) — client verifies each chunk
+  bytes  model_hash   = 5;   // SHA-256 of full model (sent on last chunk)
+}
+
+// ── Existing messages (unchanged) ─────────────────────────────────────────────
 
 message CSR {
   bytes device_pubkey = 1;
@@ -29,55 +75,49 @@ message DeviceId {
 }
 
 message RoundMetadata {
-  uint64 round_id = 1;
-  string model_version = 2;
-  double epsilon_max = 3;
-  string upload_uri = 4;
-  string state = 5;
-  uint32 num_updates = 6;
+  uint64 round_id        = 1;
+  string model_version   = 2;
+  double epsilon_max     = 3;
+  string upload_uri      = 4;   // kept for compat; use UploadUpdate RPC instead
+  string state           = 5;
+  uint32 num_updates     = 6;
   string aggregation_mode = 7;
+  bool   global_model_available = 8;  // NEW: client should call DownloadGlobalModel if true
 }
 
 message Receipt {
-  bytes device_id = 1;
-  uint64 round_id = 2;
-  bytes payload_hash = 3;
-  double epsilon_spent = 4;
-  bytes signature = 5;
-  string enc_uri = 6;
-  string scheme = 7;
-  string nonce = 8;
+  bytes   device_id     = 1;
+  uint64  round_id      = 2;
+  bytes   payload_hash  = 3;   // SHA-256 of ALL update bytes — must match stored upload
+  double  epsilon_spent = 4;   // MUST come from real RDP accountant, not hardcoded
+  bytes   signature     = 5;   // ECDSA-DER over (device_id || round_id_BE8 || payload_hash)
+  string  enc_handle    = 6;   // server GridFS ObjectId from UploadAck — NOT a file path
+  string  scheme        = 7;
+  string  nonce         = 8;
 }
 
 message Ack {
   bool ok = 1;
 }
 
-// ── New: enrollment request (phase 1, no OTP required) ───────────────────────
 message EnrollmentRequest {
-  // Device's TPM-backed public key (PEM encoded)
-  bytes device_pubkey = 1;
-  // Certificate Signing Request (PEM encoded)
-  bytes csr = 2;
-  // Human-readable device info shown to the admin (e.g. "Win11/HOSTNAME")
-  string device_info = 3;
+  bytes  device_pubkey = 1;
+  bytes  csr           = 2;
+  string device_info   = 3;
 }
 
 message EnrollmentRequestAck {
-  // true = request received; admin will see OTP on the server console
-  bool accepted = 1;
-  // Stable identifier the admin can use to match device → OTP
+  bool   accepted           = 1;
   string device_fingerprint = 2;
 }
 
-// ── Existing: enrollment completion (phase 2, OTP required) ──────────────────
 message EnrollRequest {
   string enrollment_token = 1;
-  bytes device_pubkey = 2;
-  bytes csr = 3;
+  bytes  device_pubkey    = 2;
+  bytes  csr              = 3;
 }
 
 message EnrollResponse {
-  bool ok = 1;
+  bool  ok          = 1;
   bytes client_cert = 2;
 }
