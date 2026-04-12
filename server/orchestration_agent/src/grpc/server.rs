@@ -1078,24 +1078,27 @@ impl OperationalService {
                 .rounds
                 .get(&round_id)
                 .ok_or_else(|| Status::not_found("round not found"))?;
-
+ 
             serde_json::json!({
                 "round_id":   round.id,
                 "mode":       "trimmed_mean",
                 "trim_ratio": 0.1,
                 "updates": round.updates.iter().map(|u| serde_json::json!({
-                    // enc_uri holds the GridFS ObjectId — the aggregator fetches
-                    // bytes from MongoDB and never touches the client filesystem.
+                    // enc_uri holds the GridFS ObjectId — the aggregator
+                    // fetches bytes from MongoDB, never touches client filesystem
                     "gridfs_id": u.enc_uri,
                     "scheme":    u.scheme,
                     "nonce":     u.nonce,
                 })).collect::<Vec<_>>()
             })
         };
-
+ 
         let mut child = Command::new("python3")
             .arg("server/aggregator_agent/aggregator.py")
             .env("PYTHONPATH", ".")
+            .env("MONGO_URI",
+                 std::env::var("MONGO_URI")
+                     .unwrap_or_else(|_| "mongodb://localhost:27017".to_string()))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1104,18 +1107,18 @@ impl OperationalService {
                 tracing::error!("Failed to spawn aggregator: {}", e);
                 Status::internal("aggregator spawn failed")
             })?;
-
+ 
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(job.to_string().as_bytes()) {
                 tracing::error!("Aggregator stdin write failed: {}", e);
                 return Err(Status::internal("aggregator stdin write failed"));
             }
         }
-
+ 
         let output = child
             .wait_with_output()
             .map_err(|_| Status::internal("aggregator wait failed"))?;
-
+ 
         if !output.status.success() {
             tracing::error!(
                 "Aggregator stderr: {}",
@@ -1123,36 +1126,60 @@ impl OperationalService {
             );
             return Err(Status::internal("aggregation failed"));
         }
-
+ 
         let result: serde_json::Value =
             serde_json::from_slice(&output.stdout)
-                .map_err(|_| Status::internal("aggregator output could not be parsed"))?;
-
+                .map_err(|_| Status::internal("aggregator output parse failed"))?;
+ 
         let aggregated_uri = result["aggregated_uri"]
             .as_str()
-            .ok_or_else(|| Status::internal("aggregator output missing aggregated_uri"))?
+            .ok_or_else(|| Status::internal("missing aggregated_uri"))?
             .to_string();
-
+ 
+        // FIX-SERVER-AGGREGATION: read the GridFS model ID written by Python.
+        // The aggregator's FIX-AGG-5 upserts global_models in MongoDB;
+        // we just log the ID here for traceability.
+        let gridfs_model_id = result["gridfs_model_id"]
+            .as_str()
+            .unwrap_or("(not written)");
+ 
+        if gridfs_model_id == "(not written)" {
+            tracing::warn!(
+                "Round {} aggregation: aggregator did NOT write global model \
+                 to MongoDB (gridfs_model_id missing). \
+                 Clients will not be able to warm-start. \
+                 Check aggregator logs — likely all updates lacked state dict \
+                 structure (raw tensors rather than named state dicts).",
+                round_id
+            );
+        } else {
+            tracing::info!(
+                "Round {} aggregation: global model stored in MongoDB \
+                 (gridfs_model_id={}).",
+                round_id, gridfs_model_id
+            );
+        }
+ 
         let mut round = self
             .state
             .rounds
             .get_mut(&round_id)
             .ok_or_else(|| Status::not_found("round disappeared during aggregation"))?;
-
+ 
         let num_updates = round.updates.len();
-        round.state = RoundState::Complete;
-        round.upload_uri = aggregated_uri.clone();
+        round.state       = RoundState::Complete;
+        round.upload_uri  = aggregated_uri.clone();
         round.aggregation_receipt = Some(AggregationReceipt {
             round_id,
             num_updates,
             aggregation_mode: "trimmed_mean".to_string(),
             aggregated_uri,
         });
-
+ 
         tracing::info!(
-            "Round {} aggregation complete — {} updates processed",
-            round_id,
-            num_updates
+            "Round {} aggregation complete — {} updates, \
+             global model gridfs_id={}",
+            round_id, num_updates, gridfs_model_id
         );
         Ok(())
     }
