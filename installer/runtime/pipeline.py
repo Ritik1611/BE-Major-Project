@@ -278,8 +278,8 @@ def run_pipeline(
 
     store    = SecureStore(agent="trainer", root=_STORE_ROOT)
     dp_agent = DPAgent(
-        clip_norm=1.0,
-        noise_multiplier=0.05,   # was 1.0 — that caused L2≈10345 noise on 110M params
+        clip_norm=5.0,
+        noise_multiplier=0.005,   # was 1.0 — that caused L2≈10345 noise on 110M params
         mechanism="gaussian",
         store=store,
     )
