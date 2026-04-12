@@ -29,6 +29,12 @@ def install_python_deps():
     if res.returncode != 0:
         print(res.stderr or "", end="", file=sys.stderr)
         raise RuntimeError("pip upgrade failed")
+    
+    setup_result = subprocess.run(
+        [str(python_path), "-m", "pip", "install", "--upgrade", "setuptools", "wheel", "tiktoken"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    print(setup_result.stdout or "", end="", flush=True)
 
     if not REQ_FILE.exists():
         raise RuntimeError(f"requirements.txt not found at {REQ_FILE}")
@@ -44,17 +50,22 @@ def install_python_deps():
 
     for pkg in packages:
         print(f"\n[INSTALL] {pkg}", flush=True)
-
         try:
+            # openai-whisper's setup.py needs pkg_resources from setuptools.
+            # pip's isolated build env is missing setuptools in Python 3.11+.
+            # --no-build-isolation forces pip to use the already-installed
+            # setuptools from THIS venv instead of creating an empty throwaway env.
+            extra_flags = []
+            if pkg.startswith("openai-whisper"):
+                extra_flags = ["--no-build-isolation"]
+
             result = subprocess.run(
-                [str(python_path), "-m", "pip", "install", pkg],
+                [str(python_path), "-m", "pip", "install", pkg] + extra_flags,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             )
 
-            # BUG-FIX: result.stdout was None before because check=True was used
-            # without capture_output=True.  Now we always capture and print.
             print(result.stdout or "", end="", flush=True)
 
             if result.returncode != 0:
@@ -66,9 +77,3 @@ def install_python_deps():
         except Exception as e:
             print(f"[ERROR - SKIPPED] {pkg}: {e}", flush=True)
             failed.append(pkg)
-
-    if failed:
-        print(f"\n[WARN] {len(failed)} package(s) failed to install: {failed}", flush=True)
-
-    print("\n[OK] Dependency installation complete", flush=True)
-    sys.stdout.flush()

@@ -18,6 +18,11 @@
 # For now this file keeps the original pinned versions so existing installs
 # are not broken. Hashes should be added before production deployment.
 
+# Build prerequisites — MUST be first
+setuptools>=65.5.0
+wheel>=0.41.0
+tiktoken>=0.7.0
+
 # Core
 pydantic==1.10.13
 PyYAML==6.0.2

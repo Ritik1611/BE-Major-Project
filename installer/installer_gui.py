@@ -20,6 +20,55 @@ Phase 2 (Enrollment):  appears AFTER Phase 1 succeeds
   └─────────────────────────────────────────────┘
 """
 
+# ── UAC elevation MUST happen before anything else ────────────────────────────
+# This runs before tkinter, before logging, before any other import.
+import sys
+import os
+
+def _is_admin() -> bool:
+    if sys.platform != "win32":
+        return True  # not Windows, no UAC concept
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+def _elevate_and_exit():
+    """Re-launch this process with admin rights via UAC prompt, then exit."""
+    import ctypes
+    if getattr(sys, "frozen", False):
+        # Running as compiled .exe — ShellExecuteW the exe itself
+        exe    = sys.executable
+        params = " ".join(f'"{a}"' for a in sys.argv[1:])
+    else:
+        # Running from source — re-launch python with this script
+        exe    = sys.executable
+        params = " ".join(f'"{a}"' for a in sys.argv)
+
+    ret = ctypes.windll.shell32.ShellExecuteW(
+        None,     # hwnd
+        "runas",  # verb — shows UAC shield prompt
+        exe,
+        params,
+        None,     # working dir (inherit)
+        1,        # SW_NORMAL
+    )
+    # ShellExecuteW returns > 32 on success.  <= 32 means UAC was denied.
+    if ret <= 32:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Administrator rights are required to install the federated runtime.\n\n"
+            "Please right-click the installer and select 'Run as administrator'.",
+            "Administrator Access Required",
+            0x10,  # MB_ICONERROR
+        )
+    sys.exit(0)
+
+if sys.platform == "win32" and not _is_admin():
+    _elevate_and_exit()
+
+
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
 import threading

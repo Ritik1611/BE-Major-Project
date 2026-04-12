@@ -19,6 +19,7 @@ fn default_false() -> bool { false }
 #[derive(Deserialize, Clone)]
 pub struct Server {
     pub addr: String,
+    pub mtls_addr:  String,
     pub enable_tls: bool,
     #[serde(default = "default_false")]
     pub require_client_cert: bool,

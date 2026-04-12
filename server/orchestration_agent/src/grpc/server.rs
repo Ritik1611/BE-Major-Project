@@ -58,70 +58,75 @@ use crate::round::{AggregationReceipt, RoundState, UpdateMeta};
 use crate::state::OrchestratorState;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const MAX_UPDATE_BYTES: usize = 500 * 1024 * 1024; // 500 MB absolute cap
+const MAX_UPDATE_BYTES: usize = 2 * 1024 * 1024 * 1024; // 2 GB absolute cap
 const CHUNK_SIZE_MAX: usize = 4 * 1024 * 1024; // 4 MB per chunk
 
 // ── Service struct ────────────────────────────────────────────────────────────
-pub struct Service {
+/// EnrollmentService: served on port 50051 (server-TLS only).
+/// Only RequestEnrollment and EnrollDevice are implemented.
+/// All other RPCs return UNIMPLEMENTED.
+pub struct EnrollmentService {
     state: Arc<OrchestratorState>,
-    cfg: Config,
+    cfg:   Config,
     mongo: MongoClient,
-    /// HMAC key for receipt chaining — loaded from RECEIPT_CHAIN_KEY env var,
-    /// never from config files or hardcoded defaults in production.
+}
+
+/// OperationalService: served on port 50052 (full mTLS).
+/// Implements GetRound, UploadUpdate, SubmitReceipt, DownloadGlobalModel.
+/// RegisterDevice returns deprecated stub.
+/// RequestEnrollment and EnrollDevice return UNIMPLEMENTED.
+pub struct OperationalService {
+    state:             Arc<OrchestratorState>,
+    cfg:               Config,
+    mongo:             MongoClient,
     receipt_chain_key: Vec<u8>,
 }
 
-impl Service {
+impl EnrollmentService {
+    pub fn new(state: Arc<OrchestratorState>, cfg: Config, mongo: MongoClient) -> Self {
+        Self { state, cfg, mongo }
+    }
+    fn db(&self) -> Database {
+        self.mongo.database("federated")
+    }
+}
+
+impl OperationalService {
     pub fn new(
         state: Arc<OrchestratorState>,
-        cfg: Config,
+        cfg:   Config,
         mongo: MongoClient,
     ) -> anyhow::Result<Self> {
         let receipt_chain_key = std::env::var("RECEIPT_CHAIN_KEY")
-            .map(|s| hex::decode(s).expect("RECEIPT_CHAIN_KEY must be a hex string"))
+            .map(|s| hex::decode(s).expect("RECEIPT_CHAIN_KEY must be hex"))
             .unwrap_or_else(|_| {
                 tracing::warn!(
-                    "RECEIPT_CHAIN_KEY not set — using ephemeral random key. \
-                     Receipts will NOT be verifiable across server restarts. \
-                     Set RECEIPT_CHAIN_KEY in production."
+                    "RECEIPT_CHAIN_KEY not set — ephemeral key. Set in production."
                 );
                 use rand::RngCore;
                 let mut k = vec![0u8; 32];
                 rand::thread_rng().fill_bytes(&mut k);
                 k
             });
-
-        Ok(Self {
-            state,
-            cfg,
-            mongo,
-            receipt_chain_key,
-        })
+        Ok(Self { state, cfg, mongo, receipt_chain_key })
     }
 
     fn db(&self) -> Database {
         self.mongo.database("federated")
     }
 
-    // ── FIX-SERVER-1: Enforce mTLS client certificate ─────────────────────────
-    // Previously returned Ok(()) unconditionally — every endpoint was reachable
-    // without a certificate.  Now any missing cert is an immediate rejection.
     fn require_client_cert<T>(req: &Request<T>) -> Result<(), Status> {
         match req.peer_certs() {
             Some(certs) if !certs.is_empty() => Ok(()),
             _ => {
-                tracing::warn!("Request rejected — no mTLS client certificate presented");
+                tracing::warn!("Request rejected — no mTLS client certificate");
                 Err(Status::unauthenticated(
-                    "mutual TLS client certificate required for all endpoints",
+                    "mutual TLS client certificate required",
                 ))
             }
         }
     }
 
-    // ── FIX-SERVER-6: HMAC chain computation ──────────────────────────────────
-    // Each receipt is linked to the previous one via HMAC, producing a
-    // tamper-evident ordered chain.  Inserting, removing, or reordering a
-    // receipt breaks every chain link that follows.
     fn compute_chain_hmac(&self, prev_hmac: Option<&str>, payload_hash_hex: &str) -> String {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&self.receipt_chain_key).expect("HMAC key valid");
@@ -133,8 +138,198 @@ impl Service {
 }
 
 // ── Orchestrator trait implementation ─────────────────────────────────────────
+// ── EnrollmentService: only RequestEnrollment + EnrollDevice are real ─────────
 #[tonic::async_trait]
-impl Orchestrator for Service {
+impl Orchestrator for EnrollmentService {
+    type DownloadGlobalModelStream =
+        Pin<Box<dyn Stream<Item = Result<ModelChunk, Status>> + Send + 'static>>;
+
+    async fn register_device(
+        &self,
+        _req: Request<Csr>,
+    ) -> Result<Response<Certificate>, Status> {
+        Err(Status::unimplemented("use RequestEnrollment + EnrollDevice"))
+    }
+
+    // ── Real implementation lives HERE, on the enrollment service ─────────────
+    async fn request_enrollment(
+        &self,
+        req: Request<EnrollmentRequest>,
+    ) -> Result<Response<EnrollmentRequestAck>, Status> {
+        let peer_addr = req
+            .remote_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let inner = req.into_inner();
+        if inner.device_pubkey.is_empty() {
+            return Err(Status::invalid_argument("device_pubkey is required"));
+        }
+        if inner.csr.is_empty() {
+            return Err(Status::invalid_argument("csr is required"));
+        }
+        let fingerprint_bytes = crate::crypto::hash_bytes(&inner.device_pubkey);
+        let fingerprint = hex::encode(&fingerprint_bytes[..8]);
+        let otp = crate::otp::generate_otp_for(Some(fingerprint.clone()));
+        self.state.pending_enrollments.insert(
+            fingerprint.clone(),
+            (inner.device_pubkey.clone(), inner.csr.clone()),
+        );
+        let device_info = if inner.device_info.is_empty() {
+            format!("peer={}", peer_addr)
+        } else {
+            format!(
+                "{} / peer={}",
+                &inner.device_info[..inner.device_info.len().min(60)],
+                peer_addr
+            )
+        };
+        println!("\n╔══════════════════════════════════════════════════════════╗");
+        println!("║  NEW ENROLLMENT REQUEST                                  ║");
+        println!("║  Fingerprint : {:<42} ║", fingerprint);
+        println!("║  Device      : {:<42} ║", &device_info[..device_info.len().min(42)]);
+        println!("║  OTP         : {:<42} ║", otp);
+        println!("║  Expiry      : 10 minutes                                ║");
+        println!("╚══════════════════════════════════════════════════════════╝\n");
+        tracing::info!(
+            "Enrollment requested — fingerprint={} peer={}",
+            fingerprint, peer_addr
+        );
+        Ok(Response::new(EnrollmentRequestAck {
+            accepted: true,
+            device_fingerprint: fingerprint,
+        }))
+    }
+
+    async fn enroll_device(
+        &self,
+        req: Request<EnrollRequest>,
+    ) -> Result<Response<EnrollResponse>, Status> {
+        let peer_addr = req
+            .remote_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let req_inner = req.into_inner();
+        if !crate::otp::consume_otp_from(&req_inner.enrollment_token, &peer_addr) {
+            tracing::warn!(
+                "Enrollment rejected peer={} — invalid or expired OTP",
+                peer_addr
+            );
+            return Err(Status::permission_denied("invalid or expired OTP"));
+        }
+        if req_inner.device_pubkey.is_empty() {
+            return Err(Status::invalid_argument("device_pubkey is required"));
+        }
+        if req_inner.csr.is_empty() {
+            return Err(Status::invalid_argument("csr is required"));
+        }
+        let device_id = crate::identity::derive_device_id(&req_inner.device_pubkey);
+        self.state
+            .devices
+            .insert(device_id.clone(), req_inner.device_pubkey.clone());
+
+        let mut csr_file = tempfile::NamedTempFile::new()
+            .map_err(|_| Status::internal("temp file creation failed"))?;
+        use std::io::Write as _;
+        csr_file
+            .write_all(&req_inner.csr)
+            .map_err(|_| Status::internal("CSR write failed"))?;
+        let cert_file = tempfile::NamedTempFile::new()
+            .map_err(|_| Status::internal("temp file creation failed"))?;
+
+        let output = std::process::Command::new("openssl")
+            .args([
+                "x509", "-req",
+                "-in",  csr_file.path().to_str().unwrap(),
+                "-CA",  &self.cfg.tls.ca_cert,
+                "-CAkey", &self.cfg.tls.ca_key,
+                "-CAcreateserial",
+                "-out", cert_file.path().to_str().unwrap(),
+                "-days", "365", "-sha256",
+            ])
+            .output()
+            .map_err(|e| {
+                tracing::error!("openssl exec failed: {}", e);
+                Status::internal("certificate signing failed")
+            })?;
+
+        if !output.status.success() {
+            tracing::error!(
+                "openssl stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Err(Status::internal("certificate signing failed"));
+        }
+        let signed_cert = std::fs::read(cert_file.path())
+            .map_err(|_| Status::internal("failed to read signed cert"))?;
+        if signed_cert.is_empty() {
+            return Err(Status::internal("empty certificate output"));
+        }
+
+        let db = self.db();
+        let col = db.collection::<bson::Document>("devices");
+        let device_hex = hex::encode(&device_id);
+        let pubkey_pem = String::from_utf8_lossy(&req_inner.device_pubkey).to_string();
+        col.update_one(
+            doc! { "device_id": &device_hex },
+            doc! { "$set": {
+                "device_id":   &device_hex,
+                "pubkey_pem":  pubkey_pem,
+                "enrolled_at": BsonDateTime::now(),
+                "last_seen":   BsonDateTime::now(),
+                "peer_addr":   &peer_addr,
+            }},
+            mongodb::options::UpdateOptions::builder()
+                .upsert(true)
+                .build(),
+        )
+        .await
+        .map_err(|_| Status::internal("db upsert failed"))?;
+
+        let fp_bytes = crate::crypto::hash_bytes(&req_inner.device_pubkey);
+        let fingerprint = hex::encode(&fp_bytes[..8]);
+        self.state.pending_enrollments.remove(&fingerprint);
+
+        tracing::info!(
+            "Device enrolled — fingerprint={} peer={}",
+            fingerprint, peer_addr
+        );
+        println!("[ENROLLED] fingerprint={} peer={}", fingerprint, peer_addr);
+
+        Ok(Response::new(EnrollResponse {
+            ok: true,
+            client_cert: signed_cert,
+        }))
+    }
+
+    // All operational RPCs are NOT served on enrollment port
+    async fn get_round(
+        &self,
+        _req: Request<DeviceId>,
+    ) -> Result<Response<RoundMetadata>, Status> {
+        Err(Status::unimplemented("connect to operational port 50052"))
+    }
+    async fn upload_update(
+        &self,
+        _req: Request<Streaming<UpdateChunk>>,
+    ) -> Result<Response<UploadAck>, Status> {
+        Err(Status::unimplemented("connect to operational port 50052"))
+    }
+    async fn submit_receipt(
+        &self,
+        _req: Request<Receipt>,
+    ) -> Result<Response<Ack>, Status> {
+        Err(Status::unimplemented("connect to operational port 50052"))
+    }
+    async fn download_global_model(
+        &self,
+        _req: Request<RoundRequest>,
+    ) -> Result<Response<Self::DownloadGlobalModelStream>, Status> {
+        Err(Status::unimplemented("connect to operational port 50052"))
+    }
+}
+
+#[tonic::async_trait]
+impl Orchestrator for OperationalService {
     // ── UploadUpdate (FIX-SERVER-2, FIX-SERVER-3, FIX-COMPILE-1, FIX-COMPILE-2) ──
     //
     // Clients stream encrypted model bytes directly to the server.
@@ -148,7 +343,7 @@ impl Orchestrator for Service {
         req: Request<Streaming<UpdateChunk>>,
     ) -> Result<Response<UploadAck>, Status> {
         // Every endpoint enforces mTLS.
-        // Self::require_client_cert(&req)?;
+        Self::require_client_cert(&req)?;
 
         let mut stream = req.into_inner();
         let db = self.db();
@@ -200,7 +395,7 @@ impl Orchestrator for Service {
             // Enforce absolute size cap — prevents DoS via memory exhaustion.
             if all_bytes.len() + chunk.data.len() > MAX_UPDATE_BYTES {
                 return Err(Status::resource_exhausted(
-                    "update exceeds 500 MB maximum — upload rejected",
+                    "update exceeds 2GB maximum — upload rejected",
                 ));
             }
 
@@ -376,7 +571,7 @@ impl Orchestrator for Service {
         &self,
         req: Request<RoundRequest>,
     ) -> Result<Response<Self::DownloadGlobalModelStream>, Status> {
-        // REMOVED: Self::require_client_cert(&req)?;
+        Self::require_client_cert(&req)?;
 
         let inner = req.into_inner();
         let db = self.db();
@@ -471,7 +666,7 @@ impl Orchestrator for Service {
         &self,
         req: Request<Receipt>,
     ) -> Result<Response<Ack>, Status> {
-        // Self::require_client_cert(&req)?;
+        Self::require_client_cert(&req)?;
 
         let receipt = req.into_inner();
 
@@ -699,69 +894,14 @@ impl Orchestrator for Service {
     // Phase B1: the device requests an OTP.  The server displays the OTP to the
     // administrator out-of-band.  No certificate is required here because the
     // client does not yet have one.
+    // REPLACE THE ENTIRE request_enrollment function body with:
     async fn request_enrollment(
         &self,
-        req: Request<EnrollmentRequest>,
+        _req: Request<EnrollmentRequest>,
     ) -> Result<Response<EnrollmentRequestAck>, Status> {
-        let peer_addr = req
-            .remote_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let inner = req.into_inner();
-
-        if inner.device_pubkey.is_empty() {
-            return Err(Status::invalid_argument("device_pubkey is required"));
-        }
-        if inner.csr.is_empty() {
-            return Err(Status::invalid_argument("csr is required"));
-        }
-
-        let fingerprint_bytes = hash_bytes(&inner.device_pubkey);
-        let fingerprint = hex::encode(&fingerprint_bytes[..8]);
-        let otp = crate::otp::generate_otp_for(Some(fingerprint.clone()));
-
-        self.state.pending_enrollments.insert(
-            fingerprint.clone(),
-            (inner.device_pubkey.clone(), inner.csr.clone()),
-        );
-
-        let device_info = if inner.device_info.is_empty() {
-            format!("peer={}", peer_addr)
-        } else {
-            format!(
-                "{} / peer={}",
-                &inner.device_info[..inner.device_info.len().min(60)],
-                peer_addr
-            )
-        };
-
-        // Display the OTP to the server operator.  The client will obtain it
-        // via a secure out-of-band channel (e.g. administrator tells the user).
-        println!("\n╔══════════════════════════════════════════════════════════╗");
-        println!("║  NEW ENROLLMENT REQUEST                                  ║");
-        println!(
-            "║  Fingerprint : {:<42} ║",
-            fingerprint
-        );
-        println!(
-            "║  Device      : {:<42} ║",
-            &device_info[..device_info.len().min(42)]
-        );
-        println!("║  OTP         : {:<42} ║", otp);
-        println!("║  Expiry      : 10 minutes                                ║");
-        println!("╚══════════════════════════════════════════════════════════╝\n");
-
-        tracing::info!(
-            "Enrollment requested — fingerprint={} peer={}",
-            fingerprint,
-            peer_addr
-        );
-
-        Ok(Response::new(EnrollmentRequestAck {
-            accepted: true,
-            device_fingerprint: fingerprint,
-        }))
+        Err(Status::unimplemented(
+            "use enrollment endpoint on port 50051",
+        ))
     }
 
     // ── EnrollDevice ──────────────────────────────────────────────────────────
@@ -769,127 +909,11 @@ impl Orchestrator for Service {
     // client's CSR and stores the device's public key for future receipt verification.
     async fn enroll_device(
         &self,
-        req: Request<EnrollRequest>,
+        _req: Request<EnrollRequest>,
     ) -> Result<Response<EnrollResponse>, Status> {
-        let peer_addr = req
-            .remote_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let req_inner = req.into_inner();
-
-        // Consume and validate the OTP (includes rate limiting).
-        if !crate::otp::consume_otp_from(&req_inner.enrollment_token, &peer_addr) {
-            tracing::warn!(
-                "Enrollment rejected for peer {} — invalid or expired OTP",
-                peer_addr
-            );
-            return Err(Status::permission_denied("invalid or expired OTP"));
-        }
-
-        if req_inner.device_pubkey.is_empty() {
-            return Err(Status::invalid_argument("device_pubkey is required"));
-        }
-        if req_inner.csr.is_empty() {
-            return Err(Status::invalid_argument("csr is required"));
-        }
-
-        let device_id = derive_device_id(&req_inner.device_pubkey);
-        self.state
-            .devices
-            .insert(device_id.clone(), req_inner.device_pubkey.clone());
-
-        // Sign the client's CSR with our CA.
-        let mut csr_file =
-            NamedTempFile::new().map_err(|_| Status::internal("failed to create temp file"))?;
-        csr_file
-            .write_all(&req_inner.csr)
-            .map_err(|_| Status::internal("failed to write CSR"))?;
-
-        let cert_file =
-            NamedTempFile::new().map_err(|_| Status::internal("failed to create temp file"))?;
-
-        let output = Command::new("openssl")
-            .args([
-                "x509",
-                "-req",
-                "-in",
-                csr_file.path().to_str().unwrap(),
-                "-CA",
-                &self.cfg.tls.ca_cert,
-                "-CAkey",
-                &self.cfg.tls.ca_key,
-                "-CAcreateserial",
-                "-out",
-                cert_file.path().to_str().unwrap(),
-                "-days",
-                "365",
-                "-sha256",
-            ])
-            .output()
-            .map_err(|e| {
-                tracing::error!("openssl exec failed: {}", e);
-                Status::internal("certificate signing failed")
-            })?;
-
-        if !output.status.success() {
-            tracing::error!(
-                "openssl stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return Err(Status::internal("certificate signing failed"));
-        }
-
-        let signed_cert = fs::read(cert_file.path())
-            .map_err(|_| Status::internal("failed to read signed certificate"))?;
-
-        if signed_cert.is_empty() {
-            return Err(Status::internal(
-                "certificate signing produced an empty output",
-            ));
-        }
-
-        // Persist the device in MongoDB.
-        // The pubkey_pem is stored so that SubmitReceipt can verify ECDSA signatures
-        // without contacting any external PKI.
-        let db = self.db();
-        let col = db.collection::<bson::Document>("devices");
-        let device_hex = hex::encode(&device_id);
-        let pubkey_pem = String::from_utf8_lossy(&req_inner.device_pubkey).to_string();
-
-        // Upsert so that re-enrollment replaces the old record.
-        col.update_one(
-            doc! { "device_id": &device_hex },
-            doc! { "$set": {
-                "device_id":   &device_hex,
-                "pubkey_pem":  pubkey_pem,
-                "enrolled_at": BsonDateTime::now(),
-                "last_seen":   BsonDateTime::now(),
-                "peer_addr":   &peer_addr,
-            }},
-            mongodb::options::UpdateOptions::builder()
-                .upsert(true)
-                .build(),
-        )
-        .await
-        .map_err(|_| Status::internal("db upsert failed"))?;
-
-        // Clean up the pending enrollment entry.
-        let fp_bytes = hash_bytes(&req_inner.device_pubkey);
-        let fingerprint = hex::encode(&fp_bytes[..8]);
-        self.state.pending_enrollments.remove(&fingerprint);
-
-        tracing::info!(
-            "Device enrolled — fingerprint={} peer={}",
-            fingerprint,
-            peer_addr
-        );
-        println!("[ENROLLED] fingerprint={} peer={}", fingerprint, peer_addr);
-
-        Ok(Response::new(EnrollResponse {
-            ok: true,
-            client_cert: signed_cert,
-        }))
+        Err(Status::unimplemented(
+            "use enrollment endpoint on port 50051",
+        ))
     }
 
     // ── RegisterDevice (deprecated, kept for backward compatibility) ──────────
@@ -918,7 +942,7 @@ impl Orchestrator for Service {
         &self,
         req: Request<DeviceId>,
     ) -> Result<Response<RoundMetadata>, Status> {
-        // Self::require_client_cert(&req)?;
+        Self::require_client_cert(&req)?;
 
         let inner = req.into_inner();
         let db = self.db();
@@ -984,66 +1008,69 @@ impl Orchestrator for Service {
 
 // ── Server bootstrap ──────────────────────────────────────────────────────────
 pub async fn serve(
-    cfg: Config,
+    cfg:   Config,
     state: Arc<OrchestratorState>,
     mongo: MongoClient,
 ) -> anyhow::Result<()> {
-    let svc = Service::new(state, cfg.clone(), mongo)?;
-    let addr = cfg.server.addr.parse()?;
+    let enrollment_addr:  std::net::SocketAddr = cfg.server.addr.parse()?;
+    let operational_addr: std::net::SocketAddr = cfg.server.mtls_addr.parse()?;
 
-    if cfg.server.enable_tls {
-        let server_identity = tonic::transport::Identity::from_pem(
-            std::fs::read(&cfg.tls.server_cert)?,
-            std::fs::read(&cfg.tls.server_key)?,
-        );
+    let server_identity = tonic::transport::Identity::from_pem(
+        std::fs::read(&cfg.tls.server_cert)?,
+        std::fs::read(&cfg.tls.server_key)?,
+    );
+    let client_ca = std::fs::read(&cfg.tls.ca_cert)?;
 
-        // When require_client_cert = false: server-TLS only.
-        // Client verifies server cert (prevents MITM). Client cert not
-        // required at TLS layer — handlers enforce auth via device DB + ECDSA.
-        // When require_client_cert = true: full mTLS — both sides verified
-        // at TLS transport layer.
-        let tls = if cfg.server.require_client_cert {
-            let client_ca = std::fs::read(&cfg.tls.ca_cert)?;
-            tonic::transport::ServerTlsConfig::new()
-                .identity(server_identity)
-                .client_ca_root(tonic::transport::Certificate::from_pem(client_ca))
-        } else {
-            tonic::transport::ServerTlsConfig::new()
-                .identity(server_identity)
-        };
+    // ── Port 50051: server-TLS only — enrollment ──────────────────────────────
+    let enrollment_tls = tonic::transport::ServerTlsConfig::new()
+        .identity(server_identity.clone());
 
-        tracing::info!(
-            "[SERVER] TLS mode (require_client_cert={}) — binding to {}",
-            cfg.server.require_client_cert, addr
-        );
-        println!(
-            "[SERVER] TLS mode (require_client_cert={}) on {}",
-            cfg.server.require_client_cert, addr
-        );
+    let enrollment_svc = EnrollmentService::new(state.clone(), cfg.clone(), mongo.clone());
 
+    let enroll_server = tokio::spawn(async move {
         Server::builder()
-            .tls_config(tls)?
-            .add_service(OrchestratorServer::new(svc))
-            .serve(addr)
-            .await?;
-    } else {
-        tracing::warn!("[SERVER] INSECURE mode — NOT for production");
-        println!(
-            "[SERVER] INSECURE mode on {} — set enable_tls=true in production",
-            addr
-        );
+            .tls_config(enrollment_tls)
+            .expect("enrollment TLS config failed")
+            .add_service(OrchestratorServer::new(enrollment_svc))
+            .serve(enrollment_addr)
+            .await
+            .expect("enrollment server failed")
+    });
+
+    tracing::info!("[ENROLL-SERVER] {} — server-TLS only", enrollment_addr);
+    println!("[ENROLL-SERVER] {} — server-TLS only (enrollment)", enrollment_addr);
+
+    // ── Port 50052: full mTLS — operational ───────────────────────────────────
+    let operational_tls = tonic::transport::ServerTlsConfig::new()
+        .identity(server_identity)
+        .client_ca_root(tonic::transport::Certificate::from_pem(client_ca));
+
+    let operational_svc = OperationalService::new(state, cfg, mongo)?;
+
+    let ops_server = tokio::spawn(async move {
         Server::builder()
-            .add_service(OrchestratorServer::new(svc))
-            .serve(addr)
-            .await?;
-    }
+            .tls_config(operational_tls)
+            .expect("operational TLS config failed")
+            .add_service(OrchestratorServer::new(operational_svc))
+            .serve(operational_addr)
+            .await
+            .expect("operational server failed")
+    });
+
+    tracing::info!("[OPS-SERVER] {} — full mTLS", operational_addr);
+    println!("[OPS-SERVER] {} — full mTLS (operational)", operational_addr);
+
+    tokio::try_join!(
+        async { enroll_server.await.map_err(|e: tokio::task::JoinError| anyhow::anyhow!(e)) },
+        async { ops_server.await.map_err(|e: tokio::task::JoinError| anyhow::anyhow!(e)) },
+    )?;
     Ok(())
 }
 
 // ── Aggregation ───────────────────────────────────────────────────────────────
 // Reads from GridFS by ObjectId (set by UploadUpdate) so the Python aggregator
 // never receives or needs local file paths.
-impl Service {
+impl OperationalService {
     fn run_aggregation(&self, round_id: u64) -> Result<(), Status> {
         let job = {
             let round = self

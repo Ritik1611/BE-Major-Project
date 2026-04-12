@@ -108,41 +108,43 @@ def _parse_addr(server_addr: str):
 # ── gRPC channel factory ───────────────────────────────────────────────────────
 
 def _open_channel(server_addr: str) -> grpc.Channel:
-    """TLS first (secure default), insecure only when CA cert absent."""
+    """
+    Enrollment channel: server-TLS only, connects to port 50051.
+    Called only during installation before client cert exists.
+    """
+    host = _parse_addr(server_addr)[0]
+    enr_addr = f"{host}:{50051}"
     ca_pem = KEYS_DIR / "ca.pem"
-
-    if ca_pem.exists():
+    if not ca_pem.exists():
+        raise RuntimeError(f"CA cert not found: {ca_pem}")
+    try:
+        creds = grpc.ssl_channel_credentials(root_certificates=ca_pem.read_bytes())
+        ch = grpc.secure_channel(enr_addr, creds, options=[
+            ("grpc.keepalive_time_ms",  10_000),
+            ("grpc.keepalive_timeout_ms", 5_000),
+            ("grpc.max_send_message_length",    256 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 256 * 1024 * 1024),
+        ])
+        grpc.channel_ready_future(ch).result(timeout=10)
+        return ch
+    except grpc.FutureTimeoutError:
         try:
-            creds = grpc.ssl_channel_credentials(root_certificates=ca_pem.read_bytes())
-            ch = grpc.secure_channel(
-                server_addr,
-                creds,
-                options=[
-                    ("grpc.keepalive_time_ms", 10_000),
-                    ("grpc.keepalive_timeout_ms", 5_000),
-                ],
-            )
-            grpc.channel_ready_future(ch).result(timeout=10)
-            logging.info("[gRPC] TLS channel connected")
-            return ch
-        except grpc.FutureTimeoutError:
-            try:
-                ch.close()
-            except Exception:
-                pass
-            host, _ = _parse_addr(server_addr)
-            raise RuntimeError(
-                f"[gRPC] TLS handshake timed out. Regenerate certs:\n"
-                f"  bash certs/gen_certs.sh {host}\n"
-                "  OR set enable_tls=false for local testing."
-            )
-        except Exception as e_tls:
-            logging.warning("[gRPC] TLS failed (%s), trying insecure…",
-                            type(e_tls).__name__)
-            try:
-                ch.close()
-            except Exception:
-                pass
+            ch.close()
+        except Exception:
+            pass
+        host, _ = _parse_addr(server_addr)
+        raise RuntimeError(
+            f"[gRPC] TLS handshake timed out. Regenerate certs:\n"
+            f"  bash certs/gen_certs.sh {host}\n"
+            "  OR set enable_tls=false for local testing."
+        )
+    except Exception as e_tls:
+        logging.warning("[gRPC] TLS failed (%s), trying insecure…",
+                        type(e_tls).__name__)
+        try:
+            ch.close()
+        except Exception:
+            pass
 
     logging.warning("[gRPC] No CA cert — attempting insecure channel (dev only)")
     try:
@@ -348,9 +350,9 @@ def _register_windows_task():
     </Exec>
   </Actions>
   <Principals>
-    <Principal>
+    <Principal id="Author">
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
+      <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
 </Task>"""
@@ -372,8 +374,24 @@ def _register_windows_task():
             logging.info("[DAEMON] Windows task registered: %s", task_name)
             print(f"[OK] Daemon registered as Windows scheduled task '{task_name}'")
         else:
-            logging.warning("[DAEMON] Task registration warning: %s", result.stderr)
-            print(f"[WARN] Daemon task registration: {result.stderr.strip()}")
+            logging.warning("[DAEMON] schtasks failed: %s — trying registry Run key", result.stderr)
+            print(f"[WARN] Daemon task registration via schtasks failed. Trying registry fallback.")
+            try:
+                import winreg
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                    0, winreg.KEY_SET_VALUE
+                )
+                cmd = f'"{python}" "{client}" daemon'
+                winreg.SetValueEx(key, "FederatedLearningClient", 0, winreg.REG_SZ, cmd)
+                winreg.CloseKey(key)
+                print("[OK] Daemon registered via registry Run key (runs at login)")
+                logging.info("[DAEMON] Registered via HKCU Run key")
+            except Exception as reg_err:
+                logging.warning("[DAEMON] Registry fallback also failed: %s", reg_err)
+                print(f"[WARN] Could not register daemon automatically. Run manually:")
+                print(f"  {python} \"{client}\" daemon")
     finally:
         Path(task_file).unlink(missing_ok=True)
 

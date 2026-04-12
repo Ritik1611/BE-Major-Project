@@ -1,11 +1,8 @@
 [server]
-addr = "0.0.0.0:50051"
+addr      = "0.0.0.0:50051"   # enrollment port — server-TLS only, no client cert
+mtls_addr = "0.0.0.0:50052"   # operational port — full mTLS, client cert mandatory
 enable_tls = true
-# false = server-TLS only at transport layer.
-# Enrollment works without a client cert.
-# All handlers enforce auth via device DB + ECDSA — not TLS peer certs.
-# Set true only after all clients are enrolled and have valid client certs.
-require_client_cert = false
+require_client_cert = false    # this field now applies to port 50051 only
 
 [tls]
 ca_cert = "certs/ca.pem"

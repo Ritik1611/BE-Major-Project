@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+import struct
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CANONICAL PATHS — single source of truth for the whole system
@@ -126,13 +127,22 @@ class SecureStore:
         nonce = os.urandom(12)
         ct = aesgcm.encrypt(nonce, data, None)
 
-        payload = {
-            "agent":   self.agent,
-            "context": context,
-            "nonce":   base64.b64encode(nonce).decode(),
-            "ct":      base64.b64encode(ct).decode(),
-        }
-        p.write_text(json.dumps(payload))
+        # BINARY FORMAT (replaces base64-JSON — 25% smaller):
+        # [1 byte  version=0x01]
+        # [1 byte  agent_len]
+        # [N bytes agent]
+        # [1 byte  context_len]
+        # [M bytes context]
+        # [12 bytes nonce]
+        # [remaining: ciphertext]
+        agent_b   = self.agent.encode()
+        context_b = context.encode()
+        header = (
+            b"\x01"
+            + bytes([len(agent_b)])   + agent_b
+            + bytes([len(context_b)]) + context_b
+        )
+        p.write_bytes(header + nonce + ct)
         return uri
 
     def decrypt_read(self, uri: str) -> bytes:
@@ -142,13 +152,27 @@ class SecureStore:
         if not str(p).startswith(str(self.root)):
             raise ValueError("Access outside secure store is not allowed")
 
-        raw = json.loads(p.read_text())
-        nonce = base64.b64decode(raw["nonce"])
-        ct    = base64.b64decode(raw["ct"])
+        raw = p.read_bytes()
 
-        # Use the context that was stored at write time for exact key reproduction
-        stored_context = raw.get("context", self._uri_to_context(uri))
-        key = self._derive_key(stored_context)
+        # Detect format by first byte
+        if raw[0] == 0x01:
+            # Binary format (new)
+            offset = 1
+            agent_len   = raw[offset]; offset += 1
+            agent_b     = raw[offset:offset + agent_len]; offset += agent_len
+            context_len = raw[offset]; offset += 1
+            context_b   = raw[offset:offset + context_len]; offset += context_len
+            stored_context = context_b.decode()
+            nonce = raw[offset:offset + 12]; offset += 12
+            ct    = raw[offset:]
+        else:
+            # Legacy JSON format (old files — read-only backward compat)
+            parsed = json.loads(raw.decode())
+            nonce  = base64.b64decode(parsed["nonce"])
+            ct     = base64.b64decode(parsed["ct"])
+            stored_context = parsed.get("context", self._uri_to_context(uri))
+
+        key    = self._derive_key(stored_context)
         aesgcm = AESGCM(key)
 
         try:

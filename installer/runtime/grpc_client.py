@@ -43,13 +43,14 @@ _CLIENT_CERT = KEYS / "client.pem"
 # The server certificate MUST have a SAN matching the address you connect to.
 # If connecting by IP, the cert needs IP.x = <IP> in [alt_names].
 # If connecting by hostname, the cert needs DNS.x = <hostname>.
+# In grpc_client.py, update _CHANNEL_OPTIONS:
 _CHANNEL_OPTIONS = [
     ("grpc.keepalive_time_ms",              10_000),
     ("grpc.keepalive_timeout_ms",            5_000),
     ("grpc.keepalive_permit_without_calls",      1),
     ("grpc.http2.max_pings_without_data",        0),
-    # REMOVED: grpc.ssl_target_name_override  ← was disabling hostname check
-    # REMOVED: grpc.default_authority         ← was disabling hostname check
+    ("grpc.max_send_message_length",    8 * 1024 * 1024),   # 8MB per message
+    ("grpc.max_receive_message_length", 8 * 1024 * 1024),   # 8MB per message
 ]
 
 _MAX_RETRY    = 5
@@ -131,32 +132,50 @@ def create_mtls_channel(server_addr: str) -> grpc.Channel:
     return channel
 
 
+# ENROLLMENT_PORT is the plain-TLS port used before client cert exists
+ENROLLMENT_PORT = 50051
+# OPERATIONAL_PORT is the full-mTLS port used for all post-enrollment calls
+OPERATIONAL_PORT = 50052
+
+def _operational_addr(server_addr: str) -> str:
+    """Replace the port in server_addr with the mTLS operational port."""
+    host = server_addr.rsplit(":", 1)[0]
+    return f"{host}:{OPERATIONAL_PORT}"
+
+def _enrollment_addr(server_addr: str) -> str:
+    """Return the enrollment address (port 50051)."""
+    host = server_addr.rsplit(":", 1)[0]
+    return f"{host}:{ENROLLMENT_PORT}"
+
+
 def create_grpc_stub(server_addr: str) -> OrchestratorStub:
     """
-    Create the operational mTLS stub.
-    Falls back to enrollment channel only if client cert is not yet installed.
+    Post-enrollment operational stub — full mTLS on port 50052.
+    The client cert MUST exist (installer already completed enrollment).
     """
-    try:
-        channel = create_mtls_channel(server_addr)
-        log.info("[gRPC] Using mTLS (full mutual TLS)")
-    except FileNotFoundError as e:
-        log.warning("[gRPC] Client cert missing — falling back to server-TLS: %s", e)
-        try:
-            channel = create_enrollment_channel(server_addr)
-            log.warning("[gRPC] Server-TLS only — enroll this device to use mTLS")
-        except Exception as inner:
-            trigger_self_destruct(f"Cannot establish any gRPC channel: {inner}")
-
+    ops_addr = _operational_addr(server_addr)
+    for p in [_CA_PEM, _CLIENT_KEY, _CLIENT_CERT]:
+        if not p.exists():
+            raise FileNotFoundError(
+                f"mTLS credential missing: {p}\n"
+                "Device must be enrolled before running the pipeline."
+            )
+    channel = create_mtls_channel(ops_addr)
+    log.info("[gRPC] Operational mTLS channel ready → %s", ops_addr)
     stub = OrchestratorStub(channel)
     stub._sign_message = sign_message
     return stub
 
 
 def enrollment_stub(server_addr: str) -> OrchestratorStub:
-    """Explicit enrollment-only stub (called from installer)."""
-    channel = create_enrollment_channel(server_addr)
+    """
+    Enrollment stub — server-TLS only on port 50051.
+    Used by installer before client cert exists.
+    """
+    enr_addr = _enrollment_addr(server_addr)
+    channel  = create_enrollment_channel(enr_addr)
+    log.info("[gRPC] Enrollment channel ready → %s", enr_addr)
     return OrchestratorStub(channel)
-
 
 def call_with_retry(rpc_fn, request, timeout: float = 30.0):
     """Wrap any unary gRPC call with retry + timeout."""
