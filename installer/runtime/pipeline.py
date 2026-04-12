@@ -251,6 +251,15 @@ def run_pipeline(
     log.info("[pipeline] LDA done in %.1fs", time.time() - t0)
 
     _validate_lda_output(lda_result)
+    MIN_RECORDS_FOR_TRAINING = 10  # tune this threshold
+    if lda_result.get("count", 0) < MIN_RECORDS_FOR_TRAINING:
+        log.warning(
+            "[pipeline] Only %d records — need at least %d for meaningful DP training. "
+            "Skipping this round. Collect more data first.",
+            lda_result["count"], MIN_RECORDS_FOR_TRAINING
+        )
+        return  # exit run_pipeline early, no upload
+    
     manifest_uri = lda_result["artifact_manifest"]
 
     # ── 4. Trainer ────────────────────────────────────────────────────────────

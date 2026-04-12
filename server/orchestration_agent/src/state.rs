@@ -30,7 +30,7 @@ impl OrchestratorState {
         s.rounds.insert(1, Round {
             id: 1,
             model_version: "v1".into(),
-            epsilon_max: 1.0,
+            epsilon_max: 100.0,
             upload_uri: "objectstore://round-1".into(),
             state: RoundState::Collecting,
             updates: Vec::new(),
