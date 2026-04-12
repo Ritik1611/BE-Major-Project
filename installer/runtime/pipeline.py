@@ -50,7 +50,7 @@ _INPUT_DIR  = str(Path.home() / ".federated" / "data" / "input")
 
 LDA_MODE      = "session"
 CHUNK_SIZE    = 1 * 1024 * 1024   # 1 MB per gRPC chunk
-MAX_EPS_VALUE = 10.0               # hard ceiling — server rejects > this
+MAX_EPS_VALUE = 10000.0               # hard ceiling — server rejects > this
 
 
 # ── Schema validation (unchanged) ─────────────────────────────────────────────
@@ -287,8 +287,8 @@ def run_pipeline(
 
     store    = SecureStore(agent="trainer", root=_STORE_ROOT)
     dp_agent = DPAgent(
-        clip_norm=5.0,
-        noise_multiplier=0.005,   # was 1.0 — that caused L2≈10345 noise on 110M params
+        clip_norm=1.0,
+        noise_multiplier=1.1,   # was 1.0 — that caused L2≈10345 noise on 110M params
         mechanism="gaussian",
         store=store,
     )
