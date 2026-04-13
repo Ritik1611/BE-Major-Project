@@ -39,7 +39,6 @@ ROOT CAUSES OF YOUR BYPASS (every one documented):
 This module fixes all 10 bypasses.
 """
 
-import fcntl
 import hashlib
 import hmac as _hmac
 import json

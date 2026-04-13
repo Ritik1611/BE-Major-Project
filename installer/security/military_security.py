@@ -673,7 +673,7 @@ def apply_seccomp_filter():
 
         # Use python-seccomp if available
         try:
-            import seccomp
+            import seccomp  # type: ignore[import-untyped]
             f = seccomp.SyscallFilter(defaction=seccomp.ALLOW)
             # Block dangerous syscalls
             for syscall in ["execve", "execveat", "ptrace", "mknod", "mknodat",
