@@ -89,11 +89,29 @@ def _generate_write_token() -> str:
     """
     tok = secrets.token_hex(32)
     WRITE_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    WRITE_TOKEN_FILE.write_text(tok)
+    
+    # Windows-compatible write with proper permissions
     try:
-        os.chmod(WRITE_TOKEN_FILE, 0o400)  # read-only by owner
-    except Exception:
-        pass
+        WRITE_TOKEN_FILE.write_text(tok, encoding='utf-8')
+        # Try to set read-only (may not work on all Windows systems)
+        if IS_WINDOWS:
+            import subprocess
+            try:
+                subprocess.run(
+                    ["icacls", str(WRITE_TOKEN_FILE), "/grant", f"{os.getlogin()}:R"],
+                    capture_output=True, timeout=5
+                )
+            except:
+                pass
+        else:
+            try:
+                os.chmod(WRITE_TOKEN_FILE, 0o400)
+            except Exception:
+                pass
+    except Exception as e:
+        logging.error("[TOKEN] Failed to write token file: %s", e)
+        raise
+    
     return tok
 
 

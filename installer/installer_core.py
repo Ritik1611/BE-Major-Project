@@ -705,7 +705,7 @@ def finalize_install(device_pubkey: bytes, otp: str, server_addr: str):
     logging.info("=== PHASE B2: ENROLLMENT COMPLETION ===")
     complete_enrollment(device_pubkey, otp, server_addr)
     
-    # 1. TPM Secret (Graceful Fallback for Dev/VMs without TPM)
+    # 1. TPM Secret (Windows fallback)
     logging.info("[11] Sealing master secret")
     try:
         if IS_WINDOWS:
@@ -714,7 +714,7 @@ def finalize_install(device_pubkey: bytes, otp: str, server_addr: str):
         else:
             seal_master_secret()
     except Exception as e:
-        logging.warning("[TPM] TPM sealing failed (%s). Falling back to plaintext secret for dev.", e)
+        logging.warning("[TPM] TPM sealing failed (%s). Falling back to plaintext secret.", e)
         from installer.security.tpm_seal import SECRETS_DIR, SECRET_PLAIN
         SECRETS_DIR.mkdir(parents=True, exist_ok=True)
         if not SECRET_PLAIN.exists():
@@ -725,33 +725,58 @@ def finalize_install(device_pubkey: bytes, otp: str, server_addr: str):
     logging.info("[12] Persisting install state")
     write_install_state()
     
-    # 2. Integrity Baseline
+    # 2. Integrity Baseline - ROBUST TOKEN READING
     logging.info("[13] Writing integrity baseline")
     _write_token = None
+    
+    # Try multiple methods to read the token (Windows compatibility)
     if WRITE_TOKEN_FILE.exists():
+        for attempt in range(3):
+            try:
+                # Method 1: Direct read
+                _write_token = WRITE_TOKEN_FILE.read_text(encoding='utf-8').strip()
+                logging.info("[TOKEN] Token read successfully (attempt %d)", attempt + 1)
+                break
+            except PermissionError as e:
+                logging.warning("[TOKEN] Permission denied on attempt %d: %s", attempt + 1, e)
+                if attempt < 2:
+                    import time
+                    time.sleep(0.5)  # Wait and retry
+                    # Try to reset permissions
+                    try:
+                        WRITE_TOKEN_FILE.chmod(0o644)
+                    except:
+                        pass
+                continue
+            except Exception as e:
+                logging.warning("[TOKEN] Error reading token: %s", e)
+                break
+    
+    # If token still not available, use recovery mode
+    if not _write_token:
+        logging.warning("[BASELINE] No token available - using recovery mode")
+        from installer.security.integrity import compute_tree_hash, freeze_all_agent_files
+        digest = compute_tree_hash(FEDERATED_DIR)
+        BASELINE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        BASELINE_FILE.write_text(digest)
+        freeze_all_agent_files()
+    else:
         try:
-            _write_token = WRITE_TOKEN_FILE.read_text().strip()
-        except Exception as e:
-            logging.warning("[TOKEN] Could not read write token: %s", e)
-
-    try:
-        write_baseline(write_token=_write_token)
-    except ValueError as ve:
-        if "write_token" in str(ve).lower():
-            logging.warning("[BASELINE] Token missing/used. Writing baseline in recovery mode.")
-            # Recovery path: compute & write baseline directly
-            from installer.security.integrity import compute_tree_hash, freeze_all_agent_files
-            digest = compute_tree_hash(FEDERATED_DIR)
-            BASELINE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            BASELINE_FILE.write_text(digest)
-            freeze_all_agent_files()
-        else:
-            raise
-            
+            write_baseline(write_token=_write_token)
+        except ValueError as ve:
+            if "write_token" in str(ve).lower():
+                logging.warning("[BASELINE] Token invalid - recovery mode")
+                from installer.security.integrity import compute_tree_hash, freeze_all_agent_files
+                digest = compute_tree_hash(FEDERATED_DIR)
+                BASELINE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                BASELINE_FILE.write_text(digest)
+                freeze_all_agent_files()
+            else:
+                raise
+    
     logging.info("[14] Registering daemon")
     register_daemon()
     logging.info("INSTALLER COMPLETED SUCCESSFULLY")
-
 
 def main(otp=None, server_addr=None):
     device_pubkey = setup_software(server_addr)
