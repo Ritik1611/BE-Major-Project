@@ -119,10 +119,21 @@ def _consume_write_token(provided: str) -> bool:
     """Return True and delete token file if token matches. False otherwise."""
     if not WRITE_TOKEN_FILE.exists():
         return False
-    stored = WRITE_TOKEN_FILE.read_text().strip()
+    try:
+        stored = WRITE_TOKEN_FILE.read_text(encoding='utf-8').strip()
+    except Exception as e:
+        log.warning("[TOKEN] Could not read token file from disk: %s", e)
+        return False
     match = _hmac.compare_digest(stored, provided)
     if match:
-        WRITE_TOKEN_FILE.unlink(missing_ok=True)
+        try:
+            WRITE_TOKEN_FILE.unlink(missing_ok=True)
+        except Exception as e:
+            # Best-effort deletion. The token is already consumed in memory
+            # (installer_core._install_write_token = None after write_baseline).
+            # A stale file cannot be reused because INSTALL_LOCK prevents
+            # generate_install_token() from issuing a new token.
+            log.warning("[TOKEN] Could not delete token file (ACL-restricted): %s", e)
     return match
 
 

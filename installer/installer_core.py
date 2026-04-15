@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 import logging
 from pathlib import Path
+from typing import Optional
 
 import grpc
 
@@ -47,10 +48,7 @@ from security.anti_debug import anti_debug
 from security.integrity import (
     write_baseline,
     generate_install_token,
-    WRITE_TOKEN_FILE,
-    FEDERATED_DIR,      # ← Added
-    BASELINE_FILE,      # ← Added
-    INSTALL_LOCK,       # ← Added
+    INSTALL_LOCK,
 )
 from security.tpm_attestation import (
     provision_tpm_identity,
@@ -67,6 +65,9 @@ from runtime.grpc.orchestrator_pb2 import (
     EnrollResponse,
 )
 
+# One-time write token captured in memory during Phase A.
+# Phase B uses this directly — never reads the ACL-locked file from disk.
+_install_write_token: Optional[str] = None
 IS_WINDOWS = platform.system().lower() == "windows"
 
 BASE_DIR   = Path.home() / ".federated"
@@ -683,19 +684,22 @@ def setup_software(server_addr: str) -> bytes:
     install_mentalbert_model()
 
     logging.info("[TOKEN] Generating integrity write token")
+    global _install_write_token
     try:
-        # Clear stale locks from failed installs so token generation can proceed
         if INSTALL_LOCK.exists():
             try:
                 INSTALL_LOCK.unlink(missing_ok=True)
                 logging.info("[TOKEN] Cleared stale install lock")
             except Exception as e:
                 logging.warning("[TOKEN] Could not clear stale lock: %s", e)
-                
-        generate_install_token()
-        logging.info("[TOKEN] Write token saved to disk")
+        _install_write_token = generate_install_token()   # capture in memory NOW
+        if _install_write_token:
+            logging.info("[TOKEN] Write token captured in memory (not re-read from disk)")
+        else:
+            logging.warning("[TOKEN] generate_install_token() returned None — baseline may fail")
     except RuntimeError as e:
         logging.warning("[TOKEN] Token generation skipped: %s", e)
+        _install_write_token = None
 
     logging.info("=== PHASE A COMPLETE ===")
     return device_pubkey
@@ -725,54 +729,19 @@ def finalize_install(device_pubkey: bytes, otp: str, server_addr: str):
     logging.info("[12] Persisting install state")
     write_install_state()
     
-    # 2. Integrity Baseline - ROBUST TOKEN READING
+    # 2. Integrity Baseline — use the in-memory token from Phase A.
+    # Never read from disk: the icacls applied in Phase A makes the file
+    # unreadable/undeletable between phases (WinError 5).
     logging.info("[13] Writing integrity baseline")
-    _write_token = None
-    
-    # Try multiple methods to read the token (Windows compatibility)
-    if WRITE_TOKEN_FILE.exists():
-        for attempt in range(3):
-            try:
-                # Method 1: Direct read
-                _write_token = WRITE_TOKEN_FILE.read_text(encoding='utf-8').strip()
-                logging.info("[TOKEN] Token read successfully (attempt %d)", attempt + 1)
-                break
-            except PermissionError as e:
-                logging.warning("[TOKEN] Permission denied on attempt %d: %s", attempt + 1, e)
-                if attempt < 2:
-                    import time
-                    time.sleep(0.5)  # Wait and retry
-                    # Try to reset permissions
-                    try:
-                        WRITE_TOKEN_FILE.chmod(0o644)
-                    except:
-                        pass
-                continue
-            except Exception as e:
-                logging.warning("[TOKEN] Error reading token: %s", e)
-                break
-    
-    # If token still not available, use recovery mode
-    if not _write_token:
-        logging.warning("[BASELINE] No token available - using recovery mode")
-        from installer.security.integrity import compute_tree_hash, freeze_all_agent_files
-        digest = compute_tree_hash(FEDERATED_DIR)
-        BASELINE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        BASELINE_FILE.write_text(digest)
-        freeze_all_agent_files()
-    else:
-        try:
-            write_baseline(write_token=_write_token)
-        except ValueError as ve:
-            if "write_token" in str(ve).lower():
-                logging.warning("[BASELINE] Token invalid - recovery mode")
-                from installer.security.integrity import compute_tree_hash, freeze_all_agent_files
-                digest = compute_tree_hash(FEDERATED_DIR)
-                BASELINE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                BASELINE_FILE.write_text(digest)
-                freeze_all_agent_files()
-            else:
-                raise
+    global _install_write_token
+    if _install_write_token is None:
+        raise RuntimeError(
+            "[FATAL] No write token in memory — was setup_software() called "
+            "in this same process? Do NOT restart the installer between "
+            "Phase A and Phase B."
+        )
+    write_baseline(write_token=_install_write_token)
+    _install_write_token = None   # one-time use: consume immediately
     
     logging.info("[14] Registering daemon")
     register_daemon()
