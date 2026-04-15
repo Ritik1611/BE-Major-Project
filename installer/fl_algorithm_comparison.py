@@ -680,6 +680,86 @@ def local_train(model: nn.Module, global_model: nn.Module,
         "loss": total_loss / max(n_samp, 1),
     }
 
+def local_train_scaffold(
+    model: nn.Module,
+    global_model: nn.Module,
+    dataset: Dataset,
+    cfg: LocalCfg,
+    client_c: Dict,          # per-client control variate (modified in place)
+    server_c: Dict,          # global control variate from SCAFFOLDServer
+) -> Dict:
+    """SCAFFOLD local training with control variate correction."""
+    if len(dataset) == 0:
+        return {"delta": {}, "c_delta": {}, "n_samples": 0, "loss": float("inf")}
+
+    bs = min(cfg.batch_size, len(dataset))
+    loader = DataLoader(dataset, batch_size=bs, shuffle=True, drop_last=False)
+    opt = torch.optim.SGD(model.parameters(), lr=cfg.lr)  # SCAFFOLD uses SGD
+
+    w0 = {k: v.clone() for k, v in model.state_dict().items()}
+    total_loss, n_samp = 0.0, 0
+    K = cfg.local_epochs * max(1, len(dataset) // bs)  # total local steps
+
+    model.train()
+    for _ in range(cfg.local_epochs):
+        for batch in loader:
+            audio = batch["audio"].to(DEVICE)
+            visual = batch["visual"].to(DEVICE)
+            text = batch["text"].to(DEVICE)
+            labels = batch["label"].to(DEVICE)
+
+            opt.zero_grad()
+            logits = model(audio, visual, text)
+            loss = F.cross_entropy(logits, labels)
+            loss.backward()
+
+            # SCAFFOLD correction: subtract c_i, add c
+            with torch.no_grad():
+                for n, p in model.named_parameters():
+                    if p.grad is not None and n in client_c and n in server_c:
+                        p.grad.add_(
+                            -client_c[n].to(DEVICE) + server_c[n].to(DEVICE)
+                        )
+
+            # DP-SGD if enabled
+            if cfg.use_dp:
+                with torch.no_grad():
+                    for p in model.parameters():
+                        if p.grad is None:
+                            continue
+                        norm = p.grad.norm(2)
+                        if norm > cfg.clip_norm:
+                            p.grad.mul_(cfg.clip_norm / (norm + 1e-12))
+                        p.grad.add_(
+                            torch.randn_like(p.grad) * cfg.noise_mult * cfg.clip_norm
+                        )
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_norm * 2)
+            opt.step()
+            total_loss += loss.item() * labels.size(0)
+            n_samp += labels.size(0)
+
+    # Update client control variate
+    # c_i^+ = c_i - c + (w0 - w) / (K * lr)
+    new_client_c = {}
+    c_delta = {}
+    with torch.no_grad():
+        for k, p in model.named_parameters():
+            if k in client_c:
+                w_diff = (w0.get(k, p.data.clone()).to(DEVICE) - p.data) / (
+                    max(K, 1) * cfg.lr + 1e-12
+                )
+                new_c_i = client_c[k].to(DEVICE) - server_c[k].to(DEVICE) + w_diff
+                c_delta[k] = (new_c_i - client_c[k].to(DEVICE)).cpu()
+                client_c[k] = new_c_i.cpu()
+
+    delta = {k: (model.state_dict()[k].float() - w0[k].float()) for k in w0}
+    return {
+        "delta": delta,
+        "c_delta": c_delta,
+        "n_samples": max(n_samp, 1),
+        "loss": total_loss / max(n_samp, 1),
+    }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 8: AGGREGATION STRATEGIES
@@ -769,6 +849,54 @@ class FedAdamServer:
                 v_hat = self.v[n] / c2
                 p.data -= self.lr * m_hat / (v_hat.sqrt() + self.eps)
 
+class FedYogiServer:
+    """FedYogi: Adaptive FL with Yogi second-moment update."""
+    def __init__(self, model: nn.Module, lr: float = 1e-2,
+                 beta1: float = 0.9, beta2: float = 0.999,
+                 tau: float = 1e-3):
+        self.lr = lr
+        self.b1, self.b2 = beta1, beta2
+        self.tau = tau
+        self.m = {k: torch.zeros_like(v) for k, v in model.named_parameters()}
+        self.v = {k: torch.ones_like(v) * (tau ** 2) for k, v in model.named_parameters()}
+        self.t = 0
+
+    def step(self, model: nn.Module, delta: Dict):
+        self.t += 1
+        c1 = 1 - self.b1 ** self.t
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                if n not in delta:
+                    continue
+                g = -delta[n].to(DEVICE)
+                self.m[n] = self.b1 * self.m[n] + (1 - self.b1) * g
+                # Yogi: sign-based second moment to prevent overshooting
+                self.v[n] = self.v[n] + (1 - self.b2) * (g * g - self.v[n]).sign() * (g * g)
+                self.v[n] = torch.clamp(self.v[n], min=self.tau ** 2)
+                m_hat = self.m[n] / c1
+                p.data -= self.lr * m_hat / (self.v[n].sqrt() + self.tau)
+
+
+class SCAFFOLDServer:
+    """
+    SCAFFOLD: Stochastic Controlled Averaging for FL.
+    Karimireddy et al. 2020.
+    Maintains a global control variate c to correct client drift.
+    """
+    def __init__(self, model: nn.Module):
+        # Global control variate c (server-side)
+        self.c = {k: torch.zeros_like(v)
+                  for k, v in model.named_parameters()}
+
+    def update_global_c(self, client_c_deltas: List[Dict]):
+        """Aggregate client control variate updates into global c."""
+        if not client_c_deltas:
+            return
+        n = len(client_c_deltas)
+        with torch.no_grad():
+            for k in self.c:
+                if k in client_c_deltas[0]:
+                    self.c[k] += sum(d[k].to(DEVICE) for d in client_c_deltas) / n
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 10: FL TRAINING LOOP
@@ -886,6 +1014,87 @@ def run_federated(
 
     return results
 
+def run_federated_scaffold(
+    client_datasets: List[Dataset],
+    test_loader: DataLoader,
+    model_factory,
+    n_rounds: int = 30,
+    local_cfg: LocalCfg = None,
+    use_dp: bool = True,
+    privacy_delta: float = 1e-4,
+    seed: int = 42,
+) -> List[RoundResult]:
+    """SCAFFOLD federated learning loop."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    if local_cfg is None:
+        local_cfg = LocalCfg()
+
+    global_model = model_factory().to(DEVICE)
+    scaffold_server = SCAFFOLDServer(global_model)
+
+    # Per-client control variates (initialised to zero)
+    client_cs = [
+        {k: torch.zeros_like(v) for k, v in global_model.named_parameters()}
+        for _ in client_datasets
+    ]
+
+    results = []
+    cum_eps = 0.0
+
+    for rnd in range(n_rounds):
+        updates, c_deltas, weights = [], [], []
+
+        for cid, ds in enumerate(client_datasets):
+            if len(ds) == 0:
+                continue
+            local_model = copy.deepcopy(global_model)
+            cfg = copy.copy(local_cfg)
+            cfg.use_dp = use_dp
+
+            res = local_train_scaffold(
+                local_model, global_model, ds, cfg,
+                client_cs[cid], scaffold_server.c
+            )
+            if res["n_samples"] > 0 and res["delta"]:
+                updates.append(res["delta"])
+                c_deltas.append(res.get("c_delta", {}))
+                weights.append(float(res["n_samples"]))
+
+        if not updates:
+            continue
+
+        # FedAvg aggregation of model deltas
+        agg = agg_mean(updates, weights)
+        with torch.no_grad():
+            for name, p in global_model.named_parameters():
+                if name in agg:
+                    p.data += agg[name].to(DEVICE)
+
+        # Update global control variate
+        scaffold_server.update_global_c(c_deltas)
+
+        if use_dp:
+            avg_n = np.mean([len(ds) for ds in client_datasets if len(ds) > 0])
+            sr = local_cfg.batch_size / max(avg_n, 1)
+            steps = local_cfg.local_epochs * max(1, int(avg_n / local_cfg.batch_size))
+            cum_eps += rdp_to_dp(local_cfg.noise_mult, sr, steps, privacy_delta)
+
+        loss, acc, f1 = evaluate(global_model, test_loader)
+        r = RoundResult(
+            round_num=rnd + 1, algorithm="scaffold", aggregation="mean",
+            test_loss=loss, test_acc=acc, test_f1=f1,
+            epsilon=cum_eps if use_dp else 0.0,
+            use_dp=use_dp, n_participated=len(updates),
+        )
+        results.append(r)
+
+        if (rnd + 1) % 5 == 0 or rnd == 0:
+            log.info("[scaffold/mean] R%3d | acc=%.3f f1=%.3f ε=%.3f",
+                     rnd + 1, acc, f1, cum_eps if use_dp else 0.0)
+
+    return results
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 11: VISUALISATION
@@ -943,26 +1152,49 @@ def plot_comparison(all_results: Dict[str, List[RoundResult]]):
 
 
 def latex_summary(all_results: Dict[str, List[RoundResult]]) -> str:
+    # Split into algorithm comparison and parameter sweep
+    sweep_keys = [k for k in all_results if any(
+        tag in k for tag in ["_nm", "_cn", "_le"]
+    )]
+    algo_keys  = [k for k in all_results if k not in sweep_keys]
+
+    def _table_rows(keys):
+        rows = []
+        for lbl in sorted(keys):
+            rlist = all_results[lbl]
+            final = rlist[-1]
+            eps_str = f"{final.epsilon:.2f}" if final.use_dp else "—"
+            rows.append(
+                f"{final.algorithm.upper()} & {final.aggregation.replace('_',' ')} & "
+                f"{'✓' if final.use_dp else '✗'} & "
+                f"{final.test_acc:.4f} & {final.test_f1:.4f} & {eps_str} & "
+                f"{final.round_num} \\\\"
+            )
+        return rows
+
+    # Algorithm comparison table
     lines = [
         r"\begin{table}[htbp]",
         r"\centering",
-        r"\caption{FL Algorithm Comparison on DAIC-WOZ (MentalBERT, 15 clients)}",
+        r"\caption{FL Algorithm Comparison on DAIC-WOZ (MentalBERT)}",
         r"\begin{tabular}{lllcccc}",
         r"\toprule",
         r"Algorithm & Aggregation & DP & Final Acc & F1 & $\varepsilon$ & Rounds \\",
         r"\midrule",
-    ]
-    for lbl, rlist in sorted(all_results.items()):
-        final = rlist[-1]
-        eps_str = f"{final.epsilon:.2f}" if final.use_dp else "—"
-        lines.append(
-            f"{final.algorithm.upper()} & {final.aggregation.replace('_',' ')} & "
-            f"{'✓' if final.use_dp else '✗'} & "
-            f"{final.test_acc:.4f} & {final.test_f1:.4f} & {eps_str} & "
-            f"{final.round_num} \\\\"
-        )
-    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
-    tex = "\n".join(lines)
+    ] + _table_rows(algo_keys) + [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+
+    # Parameter sweep table
+    sweep_lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\caption{DP Parameter Sweep (FedAvg, mean aggregation)}",
+        r"\begin{tabular}{lllcccc}",
+        r"\toprule",
+        r"Experiment & Aggregation & DP & Final Acc & F1 & $\varepsilon$ & Rounds \\",
+        r"\midrule",
+    ] + _table_rows(sweep_keys) + [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+
+    tex = "\n".join(lines) + "\n\n" + "\n".join(sweep_lines)
     (RESULTS_DIR / "latex_table.tex").write_text(tex)
     return tex
 
@@ -1109,18 +1341,21 @@ def main():
 
     # ── 9. Define experiments ──────────────────────────────────────────────
     EXPERIMENTS = [
+        # (algorithm, aggregation, server_lr, use_dp)
         ("fedavg",  "mean",         1.0,   False),   # baseline, no DP
         ("fedavg",  "mean",         1.0,   True),    # FedAvg + DP
-        ("fedavg",  "trimmed_mean", 1.0,   True),    # Byzantine-robust
-        ("fedavg",  "median",       1.0,   True),    # Coordinate median
-        ("fedprox", "mean",         1.0,   True),    # FedProx + DP
-        ("fedadam", "mean",         1e-3,  True),    # FedAdam + DP
+        ("fedavg",  "trimmed_mean", 1.0,   True),    # Byzantine-robust trimmed mean
+        ("fedavg",  "median",       1.0,   True),    # Coordinate-wise median
+        ("fedprox", "mean",         1.0,   True),    # FedProx (proximal term μ=0.01)
+        ("fedadam", "mean",         1e-3,  True),    # FedAdam adaptive
+        ("fedyogi", "mean",         1e-2,  True),    # FedYogi adaptive
     ]
     if len(train_pts) >= 5:
         EXPERIMENTS.append(("fedavg", "krum", 1.0, True))
 
     all_results: Dict[str, List[RoundResult]] = {}
 
+    # ── Standard algorithm experiments ────────────────────────────────────────
     for algo, agg, slr, dp_flag in EXPERIMENTS:
         if args.no_dp:
             dp_flag = False
@@ -1129,6 +1364,48 @@ def main():
 
         cfg = copy.copy(base_cfg)
         cfg.use_dp = dp_flag
+
+        if algo == "fedyogi":
+            # FedYogi uses its own server optimizer, reuse fedadam path
+            global_model_yogi = model_factory().to(DEVICE)
+            fed_yogi_server = FedYogiServer(global_model_yogi, lr=slr)
+
+            # Inline run using existing local_train + FedYogi step
+            results_yogi: List[RoundResult] = []
+            cum_eps_yogi = 0.0
+            torch.manual_seed(args.seed)
+            np.random.seed(args.seed)
+            for rnd in range(args.rounds):
+                updates_y, weights_y = [], []
+                for ds in client_datasets:
+                    if len(ds) == 0:
+                        continue
+                    lm = copy.deepcopy(global_model_yogi)
+                    c2 = copy.copy(cfg)
+                    res = local_train(lm, global_model_yogi, ds, c2)
+                    if res["n_samples"] > 0 and res["delta"]:
+                        updates_y.append(res["delta"])
+                        weights_y.append(float(res["n_samples"]))
+                if updates_y:
+                    agg_delta = agg_mean(updates_y, weights_y)
+                    fed_yogi_server.step(global_model_yogi, agg_delta)
+                    if dp_flag:
+                        avg_n = np.mean([len(ds) for ds in client_datasets if len(ds) > 0])
+                        sr = cfg.batch_size / max(avg_n, 1)
+                        steps = cfg.local_epochs * max(1, int(avg_n / cfg.batch_size))
+                        cum_eps_yogi += rdp_to_dp(cfg.noise_mult, sr, steps, privacy_delta)
+                loss_y, acc_y, f1_y = evaluate(global_model_yogi, test_loader)
+                results_yogi.append(RoundResult(
+                    round_num=rnd + 1, algorithm="fedyogi", aggregation="mean",
+                    test_loss=loss_y, test_acc=acc_y, test_f1=f1_y,
+                    epsilon=cum_eps_yogi if dp_flag else 0.0,
+                    use_dp=dp_flag, n_participated=len(updates_y),
+                ))
+                if (rnd + 1) % 5 == 0 or rnd == 0:
+                    log.info("[fedyogi/mean] R%3d | acc=%.3f f1=%.3f ε=%.3f",
+                             rnd + 1, acc_y, f1_y, cum_eps_yogi if dp_flag else 0.0)
+            all_results[label] = results_yogi
+            continue
 
         rlist = run_federated(
             algorithm=algo,
@@ -1144,6 +1421,72 @@ def main():
             seed=args.seed,
         )
         all_results[label] = rlist
+
+    # ── SCAFFOLD experiment ───────────────────────────────────────────────────
+    log.info("\n▶  Running: scaffold_mean")
+    scaffold_cfg = copy.copy(base_cfg)
+    scaffold_cfg.use_dp = not args.no_dp
+    # SCAFFOLD uses SGD internally, so set a slightly higher lr
+    scaffold_cfg.lr = 1e-3
+    all_results["scaffold_mean"] = run_federated_scaffold(
+        client_datasets=client_datasets,
+        test_loader=test_loader,
+        model_factory=model_factory,
+        n_rounds=args.rounds,
+        local_cfg=scaffold_cfg,
+        use_dp=not args.no_dp,
+        privacy_delta=privacy_delta,
+        seed=args.seed,
+    )
+
+    # ── Parameter sweep: noise multiplier (DP sensitivity) ───────────────────
+    if not args.no_dp:
+        log.info("\n▶  Parameter sweep: noise_multiplier")
+        for nm in [0.5, 1.0, 1.5, 2.0]:
+            sweep_cfg = copy.copy(base_cfg)
+            sweep_cfg.noise_mult = nm
+            sweep_cfg.use_dp = True
+            label_nm = f"fedavg_mean_nm{nm}"
+            log.info("   noise_mult=%.1f", nm)
+            all_results[label_nm] = run_federated(
+                algorithm="fedavg", aggregation="mean",
+                client_datasets=client_datasets, test_loader=test_loader,
+                model_factory=model_factory, n_rounds=args.rounds,
+                local_cfg=sweep_cfg, server_lr=1.0,
+                use_dp=True, privacy_delta=privacy_delta, seed=args.seed,
+            )
+
+        # ── Parameter sweep: clip norm ────────────────────────────────────────
+        log.info("\n▶  Parameter sweep: clip_norm")
+        for cn in [0.5, 1.0, 2.0]:
+            sweep_cfg = copy.copy(base_cfg)
+            sweep_cfg.clip_norm = cn
+            sweep_cfg.use_dp = True
+            label_cn = f"fedavg_mean_cn{cn}"
+            log.info("   clip_norm=%.1f", cn)
+            all_results[label_cn] = run_federated(
+                algorithm="fedavg", aggregation="mean",
+                client_datasets=client_datasets, test_loader=test_loader,
+                model_factory=model_factory, n_rounds=args.rounds,
+                local_cfg=sweep_cfg, server_lr=1.0,
+                use_dp=True, privacy_delta=privacy_delta, seed=args.seed,
+            )
+
+        # ── Parameter sweep: local epochs ─────────────────────────────────────
+        log.info("\n▶  Parameter sweep: local_epochs")
+        for le in [1, 3, 5, 10]:
+            sweep_cfg = copy.copy(base_cfg)
+            sweep_cfg.local_epochs = le
+            sweep_cfg.use_dp = True
+            label_le = f"fedavg_mean_le{le}"
+            log.info("   local_epochs=%d", le)
+            all_results[label_le] = run_federated(
+                algorithm="fedavg", aggregation="mean",
+                client_datasets=client_datasets, test_loader=test_loader,
+                model_factory=model_factory, n_rounds=args.rounds,
+                local_cfg=sweep_cfg, server_lr=1.0,
+                use_dp=True, privacy_delta=privacy_delta, seed=args.seed,
+            )
 
     # ── 10. Persist results ────────────────────────────────────────────────
     out = {

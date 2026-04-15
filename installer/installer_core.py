@@ -44,7 +44,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from security.anti_debug import anti_debug
-from security.integrity import write_baseline
+from security.integrity import write_baseline, generate_install_token, WRITE_TOKEN_FILE
 from security.tpm_attestation import (
     provision_tpm_identity,
     get_device_pubkey_installer_safe,
@@ -675,6 +675,13 @@ def setup_software(server_addr: str) -> bytes:
     logging.info("[10] Installing MentalBERT model")
     install_mentalbert_model()
 
+    logging.info("[TOKEN] Generating integrity write token")
+    try:
+        generate_install_token()
+        logging.info("[TOKEN] Write token saved to disk")
+    except RuntimeError as e:
+        logging.warning("[TOKEN] Token generation skipped: %s", e)
+
     logging.info("=== PHASE A COMPLETE ===")
     return device_pubkey
 
@@ -696,7 +703,10 @@ def finalize_install(device_pubkey: bytes, otp: str, server_addr: str):
     write_install_state()
 
     logging.info("[13] Writing integrity baseline")
-    write_baseline()
+    _write_token = None
+    if WRITE_TOKEN_FILE.exists():
+        _write_token = WRITE_TOKEN_FILE.read_text().strip()
+    write_baseline(write_token=_write_token)
 
     logging.info("[14] Registering daemon")
     register_daemon()
