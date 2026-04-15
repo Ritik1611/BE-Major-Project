@@ -74,7 +74,8 @@ def check():
                 [str(VENV_PYTHON), "-c", f"import {import_name}"],
                 check=True,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
+                timeout=180
             )
             print(f"[OK] {pip_name}")
         except Exception:

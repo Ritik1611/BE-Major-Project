@@ -56,7 +56,9 @@ def install_python_deps():
             # --no-build-isolation forces pip to use the already-installed
             # setuptools from THIS venv instead of creating an empty throwaway env.
             extra_flags = []
-            if pkg.startswith("openai-whisper"):
+            if pkg.startswith(("torch", "torchvision", "torchaudio")):
+                extra_flags = ["--index-url", "https://download.pytorch.org/whl/cpu"]
+            elif pkg.startswith("openai-whisper"):
                 extra_flags = ["--no-build-isolation"]
 
             result = subprocess.run(

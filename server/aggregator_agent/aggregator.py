@@ -120,6 +120,8 @@ class AggregatorAgent:
                     t = v.detach().cpu().float()
                     parts.append(t.flatten().numpy())
                     state_dict[k] = t
+                else:
+                    print("Values dropped...")
             flat = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
             return flat, state_dict if state_dict else None
 

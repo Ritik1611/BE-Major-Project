@@ -883,8 +883,22 @@ impl Orchestrator for OperationalService {
         if should_aggregate {
             round.state = RoundState::Aggregating;
             let round_id_copy = receipt.round_id;
-            drop(round); // release the DashMap lock before spawning
-            self.run_aggregation(round_id_copy)?;
+            drop(round);
+            
+            let state = self.state.clone();
+            let mongo = self.mongo.clone();
+            let cfg = self.cfg.clone();
+            let chain_key = self.receipt_chain_key.clone();
+            
+            tokio::task::spawn_blocking(move || {
+                let svc = OperationalService {
+                    state, cfg, mongo,
+                    receipt_chain_key: chain_key,
+                };
+                if let Err(e) = svc.run_aggregation(round_id_copy) {
+                    tracing::error!("Aggregation failed for round {}: {:?}", round_id_copy, e);
+                }
+            });
         }
 
         Ok(Response::new(Ack { ok: true }))

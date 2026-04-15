@@ -3,8 +3,11 @@ import numpy as np
 import io
 from server.aggregator_agent.core.centralized_secure_store import SecureStore
 from server.aggregator_agent.aggregator import AggregatorAgent
+from pathlib import Path
+_CANONICAL_ROOT = Path.home() / ".federated" / "data" / "secure_store"
+_CANONICAL_ROOT.mkdir(parents=True, exist_ok=True)
 
-store = SecureStore(agent="aggregator", root="./secure_store")
+store = SecureStore(agent="aggregator", root=_CANONICAL_ROOT)
 
 # Create encrypted update files
 updates = []
@@ -23,7 +26,7 @@ for i, vec in enumerate([
     raw_bytes = buf.getvalue()
 
     # 3. Encrypt using SecureStore AES-GCM
-    fname = f"secure_store/tmp_update_{i}.pt.enc"
+    fname = str(_CANONICAL_ROOT / f"tmp_update_{i}.pt.enc")
     uri = "file://" + fname
     store.encrypt_write(uri, raw_bytes)
 
