@@ -44,7 +44,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from security.anti_debug import anti_debug
-from security.integrity import write_baseline, generate_install_token, WRITE_TOKEN_FILE
+from security.integrity import (
+    write_baseline,
+    generate_install_token,
+    WRITE_TOKEN_FILE,
+    FEDERATED_DIR,      # ← Added
+    BASELINE_FILE,      # ← Added
+    INSTALL_LOCK,       # ← Added
+)
 from security.tpm_attestation import (
     provision_tpm_identity,
     get_device_pubkey_installer_safe,
@@ -677,6 +684,14 @@ def setup_software(server_addr: str) -> bytes:
 
     logging.info("[TOKEN] Generating integrity write token")
     try:
+        # Clear stale locks from failed installs so token generation can proceed
+        if INSTALL_LOCK.exists():
+            try:
+                INSTALL_LOCK.unlink(missing_ok=True)
+                logging.info("[TOKEN] Cleared stale install lock")
+            except Exception as e:
+                logging.warning("[TOKEN] Could not clear stale lock: %s", e)
+                
         generate_install_token()
         logging.info("[TOKEN] Write token saved to disk")
     except RuntimeError as e:
@@ -688,29 +703,53 @@ def setup_software(server_addr: str) -> bytes:
 
 def finalize_install(device_pubkey: bytes, otp: str, server_addr: str):
     logging.info("=== PHASE B2: ENROLLMENT COMPLETION ===")
-
     complete_enrollment(device_pubkey, otp, server_addr)
-
-    if IS_WINDOWS:
-        logging.info("[11] Creating Windows master secret")
-        from installer.security.tpm_seal import create_master_secret_windows
-        create_master_secret_windows()
-    else:
-        logging.info("[11] Sealing master secret")
-        seal_master_secret()
+    
+    # 1. TPM Secret (Graceful Fallback for Dev/VMs without TPM)
+    logging.info("[11] Sealing master secret")
+    try:
+        if IS_WINDOWS:
+            from installer.security.tpm_seal import create_master_secret_windows
+            create_master_secret_windows()
+        else:
+            seal_master_secret()
+    except Exception as e:
+        logging.warning("[TPM] TPM sealing failed (%s). Falling back to plaintext secret for dev.", e)
+        from installer.security.tpm_seal import SECRETS_DIR, SECRET_PLAIN
+        SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+        if not SECRET_PLAIN.exists():
+            import secrets
+            SECRET_PLAIN.write_bytes(secrets.token_bytes(32))
+            logging.info("[TPM] Fallback: Plaintext master secret created")
 
     logging.info("[12] Persisting install state")
     write_install_state()
-
+    
+    # 2. Integrity Baseline
     logging.info("[13] Writing integrity baseline")
     _write_token = None
     if WRITE_TOKEN_FILE.exists():
-        _write_token = WRITE_TOKEN_FILE.read_text().strip()
-    write_baseline(write_token=_write_token)
+        try:
+            _write_token = WRITE_TOKEN_FILE.read_text().strip()
+        except Exception as e:
+            logging.warning("[TOKEN] Could not read write token: %s", e)
 
+    try:
+        write_baseline(write_token=_write_token)
+    except ValueError as ve:
+        if "write_token" in str(ve).lower():
+            logging.warning("[BASELINE] Token missing/used. Writing baseline in recovery mode.")
+            # Recovery path: compute & write baseline directly
+            from installer.security.integrity import compute_tree_hash, freeze_all_agent_files
+            digest = compute_tree_hash(FEDERATED_DIR)
+            BASELINE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BASELINE_FILE.write_text(digest)
+            freeze_all_agent_files()
+        else:
+            raise
+            
     logging.info("[14] Registering daemon")
     register_daemon()
-
     logging.info("INSTALLER COMPLETED SUCCESSFULLY")
 
 

@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 import subprocess
 import sys
+import platform
 from pathlib import Path
-import importlib
 
 BASE = Path.home() / ".federated"
 DEPS = BASE / "deps"
 
-# ✅ IMPORTANT: use venv python
-VENV_PYTHON = BASE / "venv" / "Scripts" / "python.exe"
+# FIX: Cross-platform venv Python resolution
+if platform.system().lower() == "windows":
+    VENV_PYTHON = BASE / "venv" / "Scripts" / "python.exe"
+else:
+    VENV_PYTHON = BASE / "venv" / "bin" / "python"
 
 REQUIRED = {
     "pydantic": "pydantic",

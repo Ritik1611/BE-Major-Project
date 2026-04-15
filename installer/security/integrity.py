@@ -207,28 +207,18 @@ def _tpm_verify_baseline(data: bytes, sig: bytes) -> bool:
 # ── BYPASS-7 Fix: Set files immutable after install ───────────────────────────
 
 def _set_immutable(path: Path):
-    """Set file immutable (Linux: chattr +i; Windows: ACL deny)."""
-    if not path.exists():
-        return
+    if not path.exists(): return
     if IS_LINUX:
         try:
-            subprocess.run(
-                ["chattr", "+i", str(path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-        except Exception:
-            # Fall back to chmod 444
-            try:
-                path.chmod(0o444)
-            except Exception:
-                pass
-    else:
-        try:
-            path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            subprocess.run(["chattr", "+i", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+            return
         except Exception:
             pass
+    # Fallback: restrictive read-only
+    try:
+        path.chmod(0o444)
+    except Exception:
+        pass
 
 
 def _clear_immutable(path: Path):
@@ -246,36 +236,25 @@ def _clear_immutable(path: Path):
 
 
 def freeze_all_agent_files():
-    """
-    Called ONCE at the end of installation.
-    Makes all protected Python/config files immutable.
-    Should be called AFTER write_baseline() so the baseline itself is frozen too.
-    """
-    log.info("[integrity] Freezing agent files (chattr +i)")
+    logging.info("[integrity] Freezing agent files")
     frozen = 0
     for scope in INTEGRITY_SCOPE:
         scope_dir = FEDERATED_DIR / scope.rstrip("/")
-        if not scope_dir.exists():
-            continue
+        if not scope_dir.exists(): continue
         for path in scope_dir.rglob("*"):
-            if not path.is_file():
-                continue
+            if not path.is_file(): continue
             rel = str(path.relative_to(FEDERATED_DIR)).replace("\\", "/")
-            if any(rel.startswith(e) for e in EXCLUDE_PREFIXES):
-                continue
-            if path.suffix not in WATCHED_SUFFIXES:
-                continue
+            if any(rel.startswith(e) for e in EXCLUDE_PREFIXES): continue
+            if path.suffix not in WATCHED_SUFFIXES: continue
             _set_immutable(path)
             frozen += 1
 
-    # Also freeze the baseline and signature
     _set_immutable(BASELINE_FILE)
     _set_immutable(BASELINE_SIG)
-    # Create install-complete marker
     INSTALL_LOCK.parent.mkdir(parents=True, exist_ok=True)
     INSTALL_LOCK.write_text(str(time.time()))
     _set_immutable(INSTALL_LOCK)
-    log.info("[integrity] %d files frozen", frozen)
+    logging.info("[integrity] %d files frozen", frozen)
 
 
 # ── Core hash tree ────────────────────────────────────────────────────────────
