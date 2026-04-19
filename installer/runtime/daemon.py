@@ -32,8 +32,9 @@ BASE = Path.home() / ".federated"
 HEARTBEAT_FILE = BASE / "state" / "daemon.heartbeat"
 LOCK_FILE      = BASE / "state" / "runtime.lock"
 
-UPLOAD_INTERVAL_S  = 60 * 60    # 1 hour between uploads
-CAPTURE_WINDOW_S   = 300         # 5 minutes of capture per session
+CONTINUOUS_WINDOW_S   = 300   # 5-minute analysis windows
+CONTINUOUS_PAUSE_S    = 5     # brief pause between windows (overlap buffer flush)
+FL_UPLOAD_INTERVAL_S  = 3600  # FL batch submissions still happen every hour
 HEARTBEAT_INTERVAL = 30          # write heartbeat every 30s
 
 
@@ -107,9 +108,10 @@ def _release_lock():
 
 
 # ── Main daemon loop ──────────────────────────────────────────────────────────
-def daemon_loop(stub, device_id: bytes, master_secret: bytes):
+def daemon_loop(stub, device_id: bytes, master_secret: bytes, mode: str = "session"):
     """
-    Runs indefinitely until SIGTERM/SIGINT or _shutdown_event is set.
+    mode="session"    → scheduled FL upload daemon (5 min capture, 1-hour sleep)
+    mode="continuous" → continuous monitoring (5 min windows, 5-second pause, no long sleep)
     """
     _register_signals()
 
@@ -120,44 +122,91 @@ def daemon_loop(stub, device_id: bytes, master_secret: bytes):
     hb = _HeartbeatThread()
     hb.start()
 
-    log.info("Federated daemon started (PID %d)", os.getpid())
-    log.info("  capture window : %ds", CAPTURE_WINDOW_S)
-    log.info("  upload interval: %ds", UPLOAD_INTERVAL_S)
+    log.info("Federated daemon started (PID=%d mode=%s)", os.getpid(), mode)
 
     try:
-        while not _shutdown_event.is_set():
-            # ── 1. Wait for idle ──────────────────────────────────────────────
-            log.info("Waiting for system idle...")
-            wait_until_idle(max_wait_seconds=UPLOAD_INTERVAL_S)
-
-            if _shutdown_event.is_set():
-                break
-
-            # ── 2. Capture session data ───────────────────────────────────────
-            session_dir: Optional[Path] = None
-            try:
-                log.info("Starting %ds capture session", CAPTURE_WINDOW_S)
-                session_dir = capture_session(duration_s=CAPTURE_WINDOW_S)
-                log.info("Capture complete: %s", session_dir)
-            except Exception as e:
-                log.error("Capture failed: %s — skipping this cycle", e)
-                _shutdown_event.wait(60)
-                continue
-
-            # ── 3. Run pipeline ───────────────────────────────────────────────
-            try:
-                log.info("Running federated pipeline...")
-                run_pipeline(stub, device_id, master_secret,
-                             session_dir=session_dir)
-                log.info("Pipeline complete ✓")
-            except Exception as e:
-                log.error("Pipeline failed: %s", e)
-
-            # ── 4. Sleep until next cycle ─────────────────────────────────────
-            log.info("Sleeping %ds until next cycle...", UPLOAD_INTERVAL_S)
-            _shutdown_event.wait(timeout=UPLOAD_INTERVAL_S)
-
+        if mode == "continuous":
+            _continuous_monitoring_loop(stub, device_id, master_secret)
+        else:
+            _scheduled_upload_loop(stub, device_id, master_secret)
     finally:
         hb.stop()
         _release_lock()
         log.info("Daemon stopped cleanly")
+
+
+def _continuous_monitoring_loop(stub, device_id: bytes, master_secret: bytes):
+    """
+    Records in back-to-back windows. Each window is processed for inference.
+    No long sleep between windows — this is the TRUE continuous monitoring path.
+    A separate FL batch job would handle submitting training updates (batch/session modes).
+    """
+    log.info(
+        "[continuous] Starting continuous monitoring "
+        "(window=%ds, pause=%ds between windows)",
+        CONTINUOUS_WINDOW_S, CONTINUOUS_PAUSE_S,
+    )
+    while not _shutdown_event.is_set():
+        session_dir: Optional[Path] = None
+        try:
+            log.info("[continuous] Starting %ds capture window", CONTINUOUS_WINDOW_S)
+            session_dir = capture_session(duration_s=CONTINUOUS_WINDOW_S)
+            log.info("[continuous] Window captured → %s", session_dir)
+        except Exception as e:
+            log.error("[continuous] Capture failed: %s — retrying after %ds",
+                      e, CONTINUOUS_PAUSE_S)
+            _shutdown_event.wait(timeout=CONTINUOUS_PAUSE_S)
+            continue
+
+        try:
+            # Inference only — NO FL update submitted
+            run_pipeline(
+                stub, device_id, master_secret,
+                session_dir=session_dir,
+                pipeline_mode="continuous",   # ← inference-only path
+            )
+        except Exception as e:
+            log.error("[continuous] Inference pipeline failed: %s", e)
+
+        # Brief pause to allow disk flush and prevent CPU spinning
+        _shutdown_event.wait(timeout=CONTINUOUS_PAUSE_S)
+
+
+def _scheduled_upload_loop(stub, device_id: bytes, master_secret: bytes):
+    """
+    Original FL update daemon: captures when idle, submits FL update, sleeps 1 hour.
+    Used for batch/session modes where labeled data is processed.
+    """
+    log.info(
+        "[scheduled] FL upload daemon "
+        "(capture=%ds, sleep=%ds)",
+        CAPTURE_WINDOW_S, FL_UPLOAD_INTERVAL_S,
+    )
+    while not _shutdown_event.is_set():
+        log.info("[scheduled] Waiting for system idle...")
+        wait_until_idle(max_wait_seconds=FL_UPLOAD_INTERVAL_S)
+
+        if _shutdown_event.is_set():
+            break
+
+        session_dir: Optional[Path] = None
+        try:
+            log.info("[scheduled] Starting %ds capture", CAPTURE_WINDOW_S)
+            session_dir = capture_session(duration_s=CAPTURE_WINDOW_S)
+        except Exception as e:
+            log.error("[scheduled] Capture failed: %s — skipping cycle", e)
+            _shutdown_event.wait(timeout=60)
+            continue
+
+        try:
+            run_pipeline(
+                stub, device_id, master_secret,
+                session_dir=session_dir,
+                pipeline_mode="session",   # ← FL update path
+            )
+            log.info("[scheduled] Pipeline complete ✓")
+        except Exception as e:
+            log.error("[scheduled] Pipeline failed: %s", e)
+
+        log.info("[scheduled] Sleeping %ds until next cycle", FL_UPLOAD_INTERVAL_S)
+        _shutdown_event.wait(timeout=FL_UPLOAD_INTERVAL_S)

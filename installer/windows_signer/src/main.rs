@@ -51,7 +51,10 @@ fn cmd_init() -> Result<()> {
 fn cmd_pubkey(out_path: &str) -> Result<()> {
     let pem_bytes = export_public_key_pem()?;
     std::fs::write(out_path, &pem_bytes)
-        .map_err(|e| Error::from_win32())?;
+        .map_err(|e| {
+            eprintln!("[ERROR] Failed to write pubkey to {}: {}", out_path, e);
+            Error::from_win32()
+        })?;
     eprintln!("[OK] Public key written to {}", out_path);
     Ok(())
 }
@@ -230,7 +233,8 @@ fn encode_der_ecdsa(rs: &[u8]) -> Vec<u8> {
             prefixed.extend(v);
             v = prefixed;
         }
-        let mut out = vec![0x02, v.len() as u8];
+        assert!(v.len() <= 33, "DER integer too long: {} bytes", v.len());
+        let mut out = vec![0x02u8, v.len() as u8];
         out.extend(v);
         out
     }

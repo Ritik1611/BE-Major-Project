@@ -489,7 +489,7 @@ class CanaryMonitor:
 # Pin the CA certificate's public key hash (ATTACK-NET1 fix)
 # Compute with: openssl x509 -noout -pubkey -in ca.pem | openssl pkey -pubin -outform DER | sha256sum
 # UPDATE THIS VALUE after running gen_certs.sh
-CA_PUBKEY_PIN_SHA256 = "REPLACE_WITH_SHA256_OF_CA_PUBLIC_KEY_DER"
+CA_PUBKEY_PIN_SHA256 = "0d1af52ebda46ca3cf4e9b4302c205d69664f746590b0bf21a563c9f1cfa09da"
 
 
 def verify_cert_pin(cert_pem_bytes: bytes) -> bool:

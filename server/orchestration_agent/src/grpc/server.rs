@@ -879,7 +879,11 @@ impl Orchestrator for OperationalService {
         );
 
         // Trigger aggregation once enough updates have been received.
-        let should_aggregate = round.updates.len() >= 3;
+        let min_updates: usize = std::env::var("FL_MIN_UPDATES_FOR_AGGREGATION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        let should_aggregate = round.updates.len() >= min_updates;
         if should_aggregate {
             round.state = RoundState::Aggregating;
             let round_id_copy = receipt.round_id;
@@ -1107,20 +1111,37 @@ impl OperationalService {
             })
         };
  
+        let server_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let project_root = server_dir
+            .parent()         // orchestration_agent/
+            .and_then(|p| p.parent())  // server/
+            .and_then(|p| p.parent())  // project root
+            .unwrap_or(server_dir.as_path())
+            .to_path_buf();
+
+        let aggregator_script = project_root
+            .join("server")
+            .join("aggregator_agent")
+            .join("aggregator.py");
+
+        if !aggregator_script.exists() {
+            tracing::error!("Aggregator script not found: {:?}", aggregator_script);
+            return Err(Status::internal("aggregator script missing"));
+        }
+
         let mut child = Command::new("python3")
-            .arg("server/aggregator_agent/aggregator.py")
-            .env("PYTHONPATH", ".")
-            .env("MONGO_URI",
-                 std::env::var("MONGO_URI")
-                     .unwrap_or_else(|_| "mongodb://localhost:27017".to_string()))
+            .arg(&aggregator_script)
+            .env("PYTHONPATH", &project_root)
+            .env("MONGO_URI", std::env::var("MONGO_URI")
+                .unwrap_or_else(|_| "mongodb://localhost:27017".to_string()))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| {
-                tracing::error!("Failed to spawn aggregator: {}", e);
-                Status::internal("aggregator spawn failed")
-            })?;
  
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(e) = stdin.write_all(job.to_string().as_bytes()) {

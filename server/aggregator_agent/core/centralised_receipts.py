@@ -22,7 +22,8 @@ class CentralReceiptManager:
         self.agent = agent
         # --- existing key load logic ---
         if key_source is None:
-            key_path = Path.home() / ".local_data_agent_receipt_key"
+            # FIX
+            key_path = Path.home() / ".federated" / "state" / "receipt_hmac.key"
             if key_path.exists():
                 self.hmac_key = base64.b64decode(key_path.read_text())
             else:

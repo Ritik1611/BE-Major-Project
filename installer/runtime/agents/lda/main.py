@@ -4,7 +4,7 @@
 #            ConfigValidationError surfaces immediately with a clear message.
 
 from pydantic import BaseModel
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from pathlib import Path
 import yaml, json, time
 import pandas as pd
@@ -32,6 +32,19 @@ class PreprocessRequest(BaseModel):
     inputs: Dict[str, str]
     config_uri: str
 
+def _find_matching_audio(inputs: dict, video_path: Path) -> Optional[str]:
+    if inputs.get("audio_dir"):
+        candidate = Path(inputs["audio_dir"]) / f"{video_path.stem}.wav"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+def _find_matching_text(inputs: dict, video_path: Path) -> Optional[str]:
+    if inputs.get("text_dir"):
+        candidate = Path(inputs["text_dir"]) / f"{video_path.stem}.txt"
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8")
+    return None
 
 def _load_config(uri: str) -> dict:
     assert uri.startswith("file://"), "Only file:// URIs are supported for config"
@@ -131,42 +144,80 @@ def preprocess(req: PreprocessRequest) -> Dict[str, Any]:
     # -----------------------------
     # SESSION / CONTINUOUS
     # -----------------------------
-    if mode in ("session", "continuous"):
-        if req.inputs.get("video_dir"):
-            vdir = Path(req.inputs["video_dir"])
-            for p in sorted(vdir.glob("*.mp4")):
-                work_dir = Path(cfg["storage"]["root"]) / session_id / p.stem
-                work_dir.mkdir(parents=True, exist_ok=True)
+    if mode == "session":
+        # Recorded therapist-patient session. Has structured output (QA pairs).
+        # Produces training data → FL update.
+        if not req.inputs.get("video_dir"):
+            raise RuntimeError("session mode requires 'video_dir' in inputs")
+        vdir = Path(req.inputs["video_dir"])
+        for p in sorted(vdir.glob("*.mp4")):
+            work_dir = Path(cfg["storage"]["root"]) / session_id / p.stem
+            work_dir.mkdir(parents=True, exist_ok=True)
+            audio_file = _find_matching_audio(req.inputs, p)
+            text_input = _find_matching_text(req.inputs, p)
+            rows, artifacts, rlist = process_session_file(
+                session_id=session_id, cfg=cfg, work_dir=work_dir,
+                video_path=str(p), audio_path=audio_file,
+                text_input=text_input, mode="session", roles=None,
+            )
+            uri, ruri = _write_parquet_encrypted(store, rm, session_id, "session", rows)
+            if uri:
+                outputs.append(uri); receipts.append(ruri)
+                for i in range(len(rows)):
+                    manifest.append({"session_id": session_id, "modality": "session",
+                                    "uri": uri, "row": i})
 
-                audio_file, text_input = None, None
-                if req.inputs.get("audio_dir"):
-                    candidate = Path(req.inputs["audio_dir"]) / f"{p.stem}.wav"
-                    if candidate.exists():
-                        audio_file = str(candidate)
-                if req.inputs.get("text_dir"):
-                    candidate_txt = Path(req.inputs["text_dir"]) / f"{p.stem}.txt"
-                    if candidate_txt.exists():
-                        text_input = candidate_txt.read_text(encoding="utf-8")
+    elif mode == "interactive":
+        # Real-time therapist-guided session. No QA assembly; therapist is present live.
+        # Produces INFERENCE output only — no FL update (therapist observes predictions).
+        if not req.inputs.get("video_dir"):
+            raise RuntimeError("interactive mode requires 'video_dir' in inputs")
+        vdir = Path(req.inputs["video_dir"])
+        for p in sorted(vdir.glob("*.mp4")):
+            work_dir = Path(cfg["storage"]["root"]) / session_id / p.stem
+            work_dir.mkdir(parents=True, exist_ok=True)
+            audio_file = _find_matching_audio(req.inputs, p)
+            text_input = _find_matching_text(req.inputs, p)
+            rows, artifacts, rlist = process_session_file(
+                session_id=session_id, cfg=cfg, work_dir=work_dir,
+                video_path=str(p), audio_path=audio_file,
+                text_input=text_input, mode="interactive", roles=None,
+            )
+            uri, ruri = _write_parquet_encrypted(store, rm, session_id, "interactive", rows)
+            if uri:
+                outputs.append(uri); receipts.append(ruri)
+                for i in range(len(rows)):
+                    manifest.append({"session_id": session_id, "modality": "interactive",
+                                    "uri": uri, "row": i,
+                                    "inference_only": True})   # ← mark clearly
 
-                rows, artifacts, rlist = process_session_file(
-                    session_id=session_id,
-                    cfg=cfg,
-                    work_dir=work_dir,
-                    video_path=str(p),
-                    audio_path=audio_file,
-                    text_input=text_input,
-                    mode=mode,
-                    roles=None,
-                )
-
-                uri, ruri = _write_parquet_encrypted(store, rm, session_id, "session", rows)
-                if uri:
-                    outputs.append(uri)
-                    receipts.append(ruri)
-                    for i, _ in enumerate(rows):
-                        manifest.append({"session_id": session_id, "modality": "session", "uri": uri, "row": i})
-        else:
-            raise RuntimeError("mode 'session'/'continuous' requires 'video_dir' in inputs")
+    elif mode == "continuous":
+        # Background monitoring — live capture provided by daemon via session_dir.
+        # No structured labels, no QA pairs. INFERENCE ONLY.
+        # video_dir IS the session directory produced by capture.py.
+        if not req.inputs.get("video_dir"):
+            raise RuntimeError("continuous mode requires 'video_dir' (session capture dir) in inputs")
+        vdir = Path(req.inputs["video_dir"])
+        # Accept both .mp4 and .wav (audio-only fallback from capture.py)
+        media_files = sorted(list(vdir.glob("*.mp4")) + list(vdir.glob("*.wav")))
+        for p in media_files:
+            work_dir = Path(cfg["storage"]["root"]) / session_id / p.stem
+            work_dir.mkdir(parents=True, exist_ok=True)
+            audio_file = str(vdir / "audio.wav") if (vdir / "audio.wav").exists() else None
+            rows, artifacts, rlist = process_session_file(
+                session_id=session_id, cfg=cfg, work_dir=work_dir,
+                video_path=str(p) if p.suffix == ".mp4" else None,
+                audio_path=audio_file,
+                text_input=None, mode="continuous", roles=None,
+            )
+            uri, ruri = _write_parquet_encrypted(store, rm, session_id, "continuous", rows)
+            if uri:
+                outputs.append(uri); receipts.append(ruri)
+                for i in range(len(rows)):
+                    manifest.append({"session_id": session_id, "modality": "continuous",
+                                    "uri": uri, "row": i,
+                                    "inference_only": True})   # ← mark clearly
+            break  # only process one window per call; daemon calls repeatedly
 
     # -----------------------------
     # BATCH

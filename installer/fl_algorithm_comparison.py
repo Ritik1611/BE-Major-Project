@@ -659,16 +659,12 @@ def local_train(model: nn.Module, global_model: nn.Module,
                     for p in model.parameters():
                         if p.grad is None:
                             continue
-                        norm = p.grad.norm(2)
-                        if norm > cfg.clip_norm:
-                            p.grad.mul_(cfg.clip_norm / (norm + 1e-12))
-                        p.grad.add_(
-                            torch.randn_like(p.grad)
-                            * cfg.noise_mult * cfg.clip_norm
-                        )
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                            cfg.clip_norm * 2)
+                        g_norm = p.grad.norm(2)
+                        if g_norm > cfg.clip_norm:
+                            p.grad.mul_(cfg.clip_norm / (g_norm + 1e-12))
+                        p.grad.add_(torch.randn_like(p.grad) * cfg.noise_mult * cfg.clip_norm)
+                # Global clip once after DP noise is added
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_norm * 2)
             opt.step()
             total_loss += loss.item() * labels.size(0)
             n_samp += labels.size(0)
@@ -727,14 +723,12 @@ def local_train_scaffold(
                     for p in model.parameters():
                         if p.grad is None:
                             continue
-                        norm = p.grad.norm(2)
-                        if norm > cfg.clip_norm:
-                            p.grad.mul_(cfg.clip_norm / (norm + 1e-12))
-                        p.grad.add_(
-                            torch.randn_like(p.grad) * cfg.noise_mult * cfg.clip_norm
-                        )
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_norm * 2)
+                        g_norm = p.grad.norm(2)
+                        if g_norm > cfg.clip_norm:
+                            p.grad.mul_(cfg.clip_norm / (g_norm + 1e-12))
+                        p.grad.add_(torch.randn_like(p.grad) * cfg.noise_mult * cfg.clip_norm)
+                # Global clip once after DP noise is added
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_norm * 2)
             opt.step()
             total_loss += loss.item() * labels.size(0)
             n_samp += labels.size(0)

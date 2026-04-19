@@ -128,7 +128,7 @@ def main():
     log.info("Federated client starting (mode=%s)", mode)
 
     # ── Phase 7: start integrity watcher ─────────────────────────────────────
-    watcher = IntegrityWatcher(interval_s=300, max_violations=2)
+    watcher = IntegrityWatcher(interval_s=120, max_violations=1)
     watcher.start()
     log.info("Integrity watcher started")
 
@@ -161,10 +161,20 @@ def main():
 
         # ── Dispatch mode ─────────────────────────────────────────────────────
         if mode in ("run-once", "run_once"):
+            from runtime.capture import get_or_capture_session
+            # Check if there are existing files in the input dir
+            input_dir = Path.home() / ".federated" / "data" / "input"
+            has_existing = any(input_dir.glob("session_*/*.mp4")) if input_dir.exists() else False
+            if not has_existing:
+                log.info("No existing session data — capturing 60s for run-once")
+                session_dir = get_or_capture_session(duration_s=60)
+            else:
+                session_dir = None  # will use existing data
             metrics.record_attempt()
             t0 = time.time()
             try:
-                run_pipeline(stub, device_id, master_secret)
+                run_pipeline(stub, device_id, master_secret,
+                    session_dir=session_dir, pipeline_mode="session")
                 metrics.record_success(time.time() - t0)
                 health.healthy(last_run="success")
                 log.info("Run-once pipeline complete ✓")
@@ -177,7 +187,12 @@ def main():
         elif mode == "daemon":
             log.info("Starting daemon loop...")
             health.healthy(daemon="running")
-            daemon_loop(stub, device_id, master_secret)
+            # FIX — read mode from args or env
+            daemon_mode = os.environ.get("FED_DAEMON_MODE", "session")
+            if daemon_mode not in ("session", "continuous"):
+                log.error("Invalid FED_DAEMON_MODE=%s, must be 'session' or 'continuous'", daemon_mode)
+                sys.exit(1)
+            daemon_loop(stub, device_id, master_secret, mode=daemon_mode)
 
         else:
             log.error("Unknown mode: %s (use: daemon | run-once)", mode)

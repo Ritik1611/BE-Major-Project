@@ -48,7 +48,9 @@ _STORE_ROOT = Path.home() / ".federated" / "data" / "secure_store"
 _CONFIG_URI = f"file://{Path.home()}/.federated/configs/local_config.yaml"
 _INPUT_DIR  = str(Path.home() / ".federated" / "data" / "input")
 
-LDA_MODE      = "session"
+# FIX — add a constant set and a parameter
+FL_TRAINING_MODES = {"batch", "session"}   # produce FL model updates
+INFERENCE_ONLY_MODES = {"interactive", "continuous", "text"}  # inference only
 CHUNK_SIZE    = 1 * 1024 * 1024   # 1 MB per gRPC chunk
 MAX_EPS_VALUE = 10000.0               # hard ceiling — server rejects > this
 
@@ -65,12 +67,19 @@ def _validate_lda_output(result: dict):
     log.info("[schema] LDA output valid: %d rows", result["count"])
 
 
-_REQUIRED_TRAINER_KEYS = {"local_update_uri"}
+# FIX — split into two validators
+_REQUIRED_SUPERVISED_KEYS = {"local_update_uri"}
+_REQUIRED_AUTONOMOUS_KEYS = {"inference_uri"}
 
-def _validate_trainer_output(result: dict):
-    missing = _REQUIRED_TRAINER_KEYS - set(result.keys())
+def _validate_trainer_output(result: dict, trainer_mode: str):
+    if trainer_mode == "supervised":
+        missing = _REQUIRED_SUPERVISED_KEYS - set(result.keys())
+    else:
+        missing = _REQUIRED_AUTONOMOUS_KEYS - set(result.keys())
     if missing:
-        raise ValueError(f"Trainer output missing keys: {missing}")
+        raise ValueError(
+            f"Trainer ({trainer_mode}) output missing keys: {missing}. Got: {set(result.keys())}"
+        )
     uri  = result["local_update_uri"]
     if not uri.startswith("file://"):
         raise ValueError(f"Trainer output URI malformed: {uri}")
@@ -204,6 +213,7 @@ def run_pipeline(
     device_id: bytes,
     master_secret: bytes,
     session_dir: Optional[Path] = None,
+    pipeline_mode: str = "session",          # ← NEW parameter
 ):
     """
     Full local federated pipeline:
@@ -241,7 +251,7 @@ def run_pipeline(
     video_dir = str(session_dir) if (session_dir and session_dir.exists()) else _INPUT_DIR
 
     lda_req = PreprocessRequest(
-        mode=LDA_MODE,
+        mode=pipeline_mode,
         inputs={"video_dir": video_dir},
         config_uri=_CONFIG_URI,
     )
@@ -252,13 +262,15 @@ def run_pipeline(
 
     _validate_lda_output(lda_result)
     MIN_RECORDS_FOR_TRAINING = 1  # tune this threshold
-    if lda_result.get("count", 0) < MIN_RECORDS_FOR_TRAINING:
-        log.warning(
-            "[pipeline] Only %d records — need at least %d for meaningful DP training. "
-            "Skipping this round. Collect more data first.",
-            lda_result["count"], MIN_RECORDS_FOR_TRAINING
-        )
-        return  # exit run_pipeline early, no upload
+    if pipeline_mode in FL_TRAINING_MODES:
+        MIN_RECORDS = 5   # meaningful minimum for supervised training
+        if lda_result.get("count", 0) < MIN_RECORDS:
+            log.warning(
+                "[pipeline] Only %d records in training mode — need at least %d. "
+                "Skipping FL update this round.",
+                lda_result["count"], MIN_RECORDS,
+            )
+            return
     
     manifest_uri = lda_result["artifact_manifest"]
 
@@ -280,91 +292,105 @@ def run_pipeline(
     log.info("[pipeline] Trainer done in %.1fs", time.time() - t0)
 
     _validate_trainer_output(trainer_out)
-    local_update_uri = trainer_out["local_update_uri"]
+    if pipeline_mode in FL_TRAINING_MODES:
+        local_update_uri = trainer_out["local_update_uri"]
 
-    # ── 5. Differential Privacy ───────────────────────────────────────────────
-    log.info("[pipeline] Applying DP noise...")
+        # ── 5. Differential Privacy ───────────────────────────────────────────────
+        log.info("[pipeline] Applying DP noise...")
 
-    store    = SecureStore(agent="trainer", root=_STORE_ROOT)
-    dp_agent = DPAgent(
-        clip_norm=1.0,
-        noise_multiplier=1.1,   # was 1.0 — that caused L2≈10345 noise on 110M params
-        mechanism="gaussian",
-        store=store,
-    )
-
-    dp_result = dp_agent.process_local_update(
-        local_update_uri,
-        session_id=session_id,
-        metadata={"session_id": session_id},
-    )
-    log.info(
-        "[pipeline] DP done: L2 before=%.4f after=%.4f eps=%.6f",
-        dp_result["l2_norm_before"],
-        dp_result["l2_norm_after"],
-        dp_result.get("epsilon_spent", 0.0),
-    )
-
-    # FIX-PIPELINE-3: read real epsilon from DP agent, never hardcode
-    epsilon_spent = dp_result.get("epsilon_spent")
-    if epsilon_spent is None or epsilon_spent <= 0.0:
-        # Fallback: if DP agent didn't compute epsilon, derive a conservative
-        # estimate. Log a warning — production should always have real RDP.
-        epsilon_spent = 1.0
-        log.warning(
-            "[pipeline] DP agent did not return epsilon_spent — using fallback 1.0. "
-            "Wire up the RDP accountant in DPAgent.process_local_update()."
-        )
-    elif epsilon_spent > MAX_EPS_VALUE:
-        raise ValueError(
-            f"epsilon_spent={epsilon_spent:.4f} exceeds hard ceiling {MAX_EPS_VALUE} "
-            f"— reduce noise multiplier or clip norm"
+        store    = SecureStore(agent="trainer", root=_STORE_ROOT)
+        dp_agent = DPAgent(
+            clip_norm=1.0,
+            noise_multiplier=1.1,   # was 1.0 — that caused L2≈10345 noise on 110M params
+            mechanism="gaussian",
+            store=store,
         )
 
-    # ── 6. Encryption ─────────────────────────────────────────────────────────
-    log.info("[pipeline] Finalizing encryption...")
-    enc_agent       = EncryptionAgent(mode="aes")
-    enc_result      = enc_agent.process_dp_update(dp_result["receipt_uri"])
-    final_update_uri = enc_result["receipt"]["outputs"][0]
+        dp_result = dp_agent.process_local_update(
+            local_update_uri,
+            session_id=session_id,
+            metadata={"session_id": session_id},
+        )
+        log.info(
+            "[pipeline] DP done: L2 before=%.4f after=%.4f eps=%.6f",
+            dp_result["l2_norm_before"],
+            dp_result["l2_norm_after"],
+            dp_result.get("epsilon_spent", 0.0),
+        )
 
-    # ── 7. Stream bytes to server (FIX-PIPELINE-1,4,5) ───────────────────────
-    log.info("[pipeline] Streaming update to server...")
-    t0 = time.time()
+        # FIX-PIPELINE-3: read real epsilon from DP agent, never hardcode
+        epsilon_spent = dp_result.get("epsilon_spent")
+        if epsilon_spent is None or epsilon_spent <= 0.0:
+            # Fallback: if DP agent didn't compute epsilon, derive a conservative
+            # estimate. Log a warning — production should always have real RDP.
+            epsilon_spent = 1.0
+            log.warning(
+                "[pipeline] DP agent did not return epsilon_spent — using fallback 1.0. "
+                "Wire up the RDP accountant in DPAgent.process_local_update()."
+            )
+        elif epsilon_spent > MAX_EPS_VALUE:
+            raise ValueError(
+                f"epsilon_spent={epsilon_spent:.4f} exceeds hard ceiling {MAX_EPS_VALUE} "
+                f"— reduce noise multiplier or clip norm"
+            )
 
-    server_handle, payload_hash = _stream_update(
-        stub,
-        device_id=device_id,
-        round_id=round_meta.round_id,
-        update_path=final_update_uri,
-        session_id=session_id,
-    )
+        # ── 6. Encryption ─────────────────────────────────────────────────────────
+        log.info("[pipeline] Finalizing encryption...")
+        enc_agent       = EncryptionAgent(mode="aes")
+        enc_result      = enc_agent.process_dp_update(dp_result["receipt_uri"])
+        final_update_uri = enc_result["receipt"]["outputs"][0]
 
-    log.info("[pipeline] Stream complete in %.1fs", time.time() - t0)
+        # ── 7. Stream bytes to server (FIX-PIPELINE-1,4,5) ───────────────────────
+        log.info("[pipeline] Streaming update to server...")
+        t0 = time.time()
 
-    # ── 8. Submit receipt (FIX-PIPELINE-2,3) ─────────────────────────────────
-    log.info("[pipeline] Submitting receipt to server...")
+        server_handle, payload_hash = _stream_update(
+            stub,
+            device_id=device_id,
+            round_id=round_meta.round_id,
+            update_path=final_update_uri,
+            session_id=session_id,
+        )
 
-    # Sign canonical message: device_id || round_id (8 bytes BE) || payload_hash
-    msg = (
-        device_id
-        + round_meta.round_id.to_bytes(8, "big")
-        + payload_hash           # SHA-256 of actual uploaded bytes
-    )
-    signature = sign_message(msg)
+        log.info("[pipeline] Stream complete in %.1fs", time.time() - t0)
 
-    receipt = Receipt(
-        device_id=device_id,
-        round_id=round_meta.round_id,
-        payload_hash=payload_hash,           # FIX-PIPELINE-4: real hash
-        epsilon_spent=epsilon_spent,         # FIX-PIPELINE-3: real epsilon
-        signature=signature,
-        enc_handle=server_handle,            # FIX-PIPELINE-2: GridFS ID
-        scheme="AES-GCM-DP-ECDSA",
-        nonce="",
-    )
+        # ── 8. Submit receipt (FIX-PIPELINE-2,3) ─────────────────────────────────
+        log.info("[pipeline] Submitting receipt to server...")
 
-    ack = call_with_retry(stub.SubmitReceipt, receipt, timeout=15)
-    if ack.ok:
-        log.info("[pipeline] ✅ Round %d update submitted", round_meta.round_id)
+        # Sign canonical message: device_id || round_id (8 bytes BE) || payload_hash
+        msg = (
+            device_id
+            + round_meta.round_id.to_bytes(8, "big")
+            + payload_hash           # SHA-256 of actual uploaded bytes
+        )
+        signature = sign_message(msg)
+
+        from runtime.runtime_guard import generate_receipt_nonce
+
+        nonce = secrets.token
+
+        receipt = Receipt(
+            device_id=device_id,
+            round_id=round_meta.round_id,
+            payload_hash=payload_hash,           # FIX-PIPELINE-4: real hash
+            epsilon_spent=epsilon_spent,         # FIX-PIPELINE-3: real epsilon
+            signature=signature,
+            enc_handle=server_handle,            # FIX-PIPELINE-2: GridFS ID
+            scheme="AES-GCM-DP-ECDSA",
+            nonce=nonce,
+        )
+
+        ack = call_with_retry(stub.SubmitReceipt, receipt, timeout=15)
+        if ack.ok:
+            log.info("[pipeline] ✅ Round %d update submitted", round_meta.round_id)
+        else:
+            log.warning("[pipeline] Server returned ok=False for round %d", round_meta.round_id)
+
     else:
-        log.warning("[pipeline] Server returned ok=False for round %d", round_meta.round_id)
+        # Inference-only path: log predictions, do NOT submit FL update
+        log.info(
+            "[pipeline] Inference-only mode (%s) — predictions stored at %s, no FL update submitted",
+            pipeline_mode,
+            trainer_out.get("inference_uri", "(no uri)"),
+        )
+        return   # exit run_pipeline cleanly

@@ -803,9 +803,22 @@ def process_session_file(
             log.warning("Failed to create segment receipt: %s", e)
 
     # ── QA assembly for session mode ──────────────────────────────────────────
+    # FIX:
     if mode == "session":
         rows = sorted(rows, key=lambda r: r["start_time"])
         rows = _assemble_qa_pairs(rows, cfg)
+    elif mode == "continuous":
+        # Background monitoring: no role mapping, no QA pairs.
+        # Just chronological segments with inference labels.
+        rows = sorted(rows, key=lambda r: r["start_time"])
+        for r in rows:
+            r["role"] = "subject"           # single subject being monitored
+            r.setdefault("derived", {})
+            r["derived"]["inference_only"] = True
+            r["derived"]["no_fl_update"] = True
+    # interactive: chronological, no QA, physician present but no role mapping needed
+    elif mode == "interactive":
+        rows = sorted(rows, key=lambda r: r["start_time"])
 
     artifacts["rows_count"] = len(rows)
     return rows, artifacts, receipts

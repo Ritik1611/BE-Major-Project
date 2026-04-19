@@ -30,7 +30,10 @@ impl OrchestratorState {
         s.rounds.insert(1, Round {
             id: 1,
             model_version: "v1".into(),
-            epsilon_max: 100.0,
+            epsilon_max: std::env::var("FL_EPSILON_MAX")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(8.0),   // sane default — read from env in production
             upload_uri: "objectstore://round-1".into(),
             state: RoundState::Collecting,
             updates: Vec::new(),
