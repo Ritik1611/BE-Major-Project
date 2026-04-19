@@ -1,1 +1,7 @@
 target/*
+target/*certs/*.key
+server.key
+*.key
+certs/*.key
+server.key
+*.key
