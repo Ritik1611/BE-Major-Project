@@ -1,5 +1,6 @@
 target/*
 target/certs/*.key
+certs/*
 server.key
 *.key
 certs/*.key
