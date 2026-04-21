@@ -1,112 +1,144 @@
-// main.rs
+// server/orchestration_agent/src/main.rs
+// Zero-trust orchestrator entrypoint — filesystem/ledger backend (NO MongoDB)
 
+// ── MODULE DECLARATIONS (MUST come before ANY use statements) ────────────────
 mod config;
 mod crypto;
 mod errors;
 mod grpc;
 mod identity;
 mod ledger;
+mod otp;
 mod pubsub;
 mod receipts;
 mod round;
 mod state;
-mod otp;
+
+// ── IMPORTS (after module declarations) ─────────────────────────────────────
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::env;
+
+use anyhow::{Context, Result};
+use dirs;
+use tokio::signal;
+use tracing_subscriber;
 
 use crate::config::Config;
 use crate::state::OrchestratorState;
+use crate::grpc::server::serve;
 
+// ── MAIN ENTRYPOINT ─────────────────────────────────────────────────────────
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // ── 1. Init logging ───────────────────────────────────────────────────────
-    tracing_subscriber::fmt::init();
+async fn main() -> Result<()> {
+    // ── 1. Initialize structured logging ───────────────────────────────────
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,orchestrator=debug,tower=warn".into())
+        )
+        .with_target(false)
+        .with_thread_ids(true)
+        .init();
 
-    // ── 2. Load config ────────────────────────────────────────────────────────
-    let cfg = Config::load("config/orchestrator.toml")?;
+    tracing::info!("🚀 Federated Orchestrator starting (filesystem/ledger backend)");
 
-    // ── 3. Connect to MongoDB ──────────────────────────────────────────────────
-    // FIX: MongoDB URI from environment — never hardcoded
-    let mongo_uri = std::env::var("MONGO_URI")
+    // ── 2. Load configuration ──────────────────────────────────────────────
+    let config_path = env::var("CONFIG_PATH").unwrap_or_else(|_| "config/orchestrator.toml".into());
+    let cfg = Config::load(&config_path)
+        .with_context(|| format!("Failed to load config from '{}'", config_path))?;
+    tracing::info!("Configuration loaded from: {}", config_path);
+
+    // ── 3. Resolve canonical server root ───────────────────────────────────
+    let server_root: PathBuf = env::var("FL_SERVER_ROOT")
+        .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            tracing::warn!("MONGO_URI not set — using localhost default");
-            "mongodb://localhost:27017".to_string()
+            tracing::warn!("FL_SERVER_ROOT not set — using default ~/.federated/server");
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".federated")
+                .join("server")
         });
 
-    let mongo = mongodb::Client::with_uri_str(&mongo_uri).await?;
+    // ── 4. Validate & create required directories ──────────────────────────
+    let dirs_to_verify = [
+        server_root.clone(),
+        server_root.join("devices"),
+        server_root.join("rounds"),
+        server_root.join("global_models"),
+        server_root.join("logs"),
+    ];
+    for dir in &dirs_to_verify {
+        if !dir.exists() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("Failed to create directory: {:?}", dir))?;
+            tracing::info!("Created directory: {:?}", dir);
+        }
+    }
+    tracing::info!("Server root verified: {:?}", server_root);
 
-    // Verify connectivity
-    mongo.database("federated")
-        .run_command(mongodb::bson::doc! { "ping": 1 }, None)
+    // ── 5. Validate TLS certificates & keys ────────────────────────────────
+    verify_file_exists(&cfg.tls.ca_cert, "CA certificate")?;
+    verify_file_exists(&cfg.tls.ca_key, "CA private key")?;
+    verify_file_exists(&cfg.tls.server_cert, "Server certificate")?;
+    verify_file_exists(&cfg.tls.server_key, "Server private key")?;
+    tracing::info!("TLS certificates verified successfully");
+
+    // ── 6. Validate receipt chaining key ───────────────────────────────────
+    if env::var("RECEIPT_CHAIN_KEY").is_err() {
+        tracing::warn!(
+            "⚠️  RECEIPT_CHAIN_KEY not set. Server will use an EPHEMERAL HMAC key. \
+             Receipt chains will break on restart. Set in production."
+        );
+    }
+
+    // ── 7. Initialize in-memory state ──────────────────────────────────────
+    let state = Arc::new(OrchestratorState::new(server_root.clone()));
+    tracing::info!("Orchestrator state initialized (Round 1: Collecting)");
+
+    // ── 8. Start dual-port gRPC servers ────────────────────────────────────
+    let server_handle = tokio::spawn(async move {
+        serve(cfg, state).await
+    });
+
+    // ── 9. Graceful shutdown on SIGINT/SIGTERM ─────────────────────────────
+    tracing::info!("✅ Orchestrator running. Press Ctrl+C to stop.");
+    signal::ctrl_c()
         .await
-        .map_err(|e| anyhow::anyhow!("MongoDB connection failed: {}", e))?;
+        .context("Failed to install signal handler")?;
 
-    tracing::info!("MongoDB connected: {}", mongo_uri);
-
-    // Ensure indexes exist
-    _ensure_indexes(&mongo).await?;
-
-    // ── 4. Create shared orchestrator state ───────────────────────────────────
-    let state = OrchestratorState::new();
-
-    // ── 5. Bootstrap enrollment OTP ───────────────────────────────────────────
-    let otp = crate::otp::generate_otp();
-    state.enrollment_tokens.insert(otp.clone(), ());
-    println!("[DEV] Enrollment OTP: {} (valid for 10 minutes)", otp);
-    tracing::info!("Enrollment OTP generated — valid 10 minutes");
-
-    // ── 6. Start background systems ───────────────────────────────────────────
-    pubsub::start(state.clone());
-
-    // ── 7. Start gRPC server ──────────────────────────────────────────────────
-    grpc::server::serve(cfg, state, mongo).await?;
+    tracing::info!("🛑 Shutdown signal received. Flushing state & exiting...");
+    let _ = server_handle.await?;
+    tracing::info!("👋 Orchestrator stopped cleanly.");
 
     Ok(())
 }
 
-async fn _ensure_indexes(mongo: &mongodb::Client) -> anyhow::Result<()> {
-    use mongodb::bson::doc;
-    use mongodb::IndexModel;
-    use mongodb::options::IndexOptions;
-
-    let db = mongo.database("federated");
-
-    // devices: unique index on device_id
-    db.collection::<mongodb::bson::Document>("devices")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "device_id": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-            None,
-        ).await?;
-
-    // model_updates: compound index for receipt verification lookup
-    db.collection::<mongodb::bson::Document>("model_updates")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "file_id": 1, "device_id": 1, "round_id": 1 })
-                .build(),
-            None,
-        ).await?;
-
-    // receipts: index for chain lookup (most recent per round)
-    db.collection::<mongodb::bson::Document>("receipts")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "round_id": 1, "_id": -1 })
-                .build(),
-            None,
-        ).await?;
-
-    // global_models: index on round_id
-    db.collection::<mongodb::bson::Document>("global_models")
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "round_id": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-            None,
-        ).await?;
-
-    tracing::info!("MongoDB indexes ensured");
+// ── Helper: verify file exists and has secure permissions ──────────────────
+fn verify_file_exists(path: &str, description: &str) -> Result<()> {
+    let p = PathBuf::from(path);
+    if !p.exists() {
+        return Err(anyhow::anyhow!("{} not found: {:?}", description, p));
+    }
+    if !p.is_file() {
+        return Err(anyhow::anyhow!("{} is not a file: {:?}", description, p));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&p)
+            .with_context(|| format!("Cannot stat {}: {:?}", description, p))?;
+        let mode = meta.permissions().mode();
+        let octal = mode & 0o777;
+        if description.contains("key") && (octal & 0o77 != 0) {
+            tracing::warn!(
+                "⚠️  {} has insecure permissions ({:o}). Should be 0600. \
+                 Run: chmod 600 {}",
+                description,
+                octal,
+                p.display()
+            );
+        }
+    }
     Ok(())
 }

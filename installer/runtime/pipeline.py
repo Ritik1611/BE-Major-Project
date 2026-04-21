@@ -30,6 +30,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Optional
+import secrets
 
 from agents.lda.main import preprocess, PreprocessRequest
 from agents.trainer.trainer_mentalbert_privacy import orchestrate as trainer_orchestrate
@@ -261,7 +262,6 @@ def run_pipeline(
     log.info("[pipeline] LDA done in %.1fs", time.time() - t0)
 
     _validate_lda_output(lda_result)
-    MIN_RECORDS_FOR_TRAINING = 1  # tune this threshold
     if pipeline_mode in FL_TRAINING_MODES:
         MIN_RECORDS = 5   # meaningful minimum for supervised training
         if lda_result.get("count", 0) < MIN_RECORDS:
@@ -275,14 +275,15 @@ def run_pipeline(
     manifest_uri = lda_result["artifact_manifest"]
 
     # ── 4. Trainer ────────────────────────────────────────────────────────────
-    log.info("[pipeline] Running trainer (mode=supervised)...")
+    trainer_mode = "supervised" if pipeline_mode in FL_TRAINING_MODES else "autonomous"
+    log.info(f"[pipeline] Running trainer (mode={trainer_mode})...")
 
     trainer_kwargs = {
-        "input_path":  manifest_uri,
-        "session_id":  session_id,
-        "mode":        "supervised",
-        "epochs":      1,
-        "batch_size":  8,
+        "input_path": manifest_uri,
+        "session_id": session_id,
+        "mode":       trainer_mode,      # ← was hardcoded "supervised"
+        "epochs":     1,
+        "batch_size": 8,
     }
     if global_model_path:
         trainer_kwargs["global_model_path"] = global_model_path
@@ -291,8 +292,9 @@ def run_pipeline(
     trainer_out = trainer_orchestrate(**trainer_kwargs)
     log.info("[pipeline] Trainer done in %.1fs", time.time() - t0)
 
-    _validate_trainer_output(trainer_out)
+    _validate_trainer_output(trainer_out, trainer_mode)
     if pipeline_mode in FL_TRAINING_MODES:
+        _validate_trainer_output(trainer_out, trainer_mode)
         local_update_uri = trainer_out["local_update_uri"]
 
         # ── 5. Differential Privacy ───────────────────────────────────────────────
@@ -367,7 +369,7 @@ def run_pipeline(
 
         from runtime.runtime_guard import generate_receipt_nonce
 
-        nonce = secrets.token
+        nonce = secrets.token_hex(32)
 
         receipt = Receipt(
             device_id=device_id,

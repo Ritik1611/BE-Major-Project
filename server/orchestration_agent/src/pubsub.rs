@@ -1,18 +1,17 @@
 use crate::state::OrchestratorState;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
 
 pub fn start(state: Arc<OrchestratorState>) {
     tokio::spawn(async move {
         loop {
-            for r in state.rounds.iter() {
-                tracing::info!(
-                    "Round {} active (model {})",
-                    r.id,
-                    r.model_version
-                );
+            {
+                // Lock is dropped at end of this block — before the await
+                let rounds = state.rounds.read().unwrap();
+                for (_, r) in rounds.iter() {
+                    tracing::info!("Round {} active (model {})", r.id, r.model_version);
+                }
             }
-            sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         }
     });
 }

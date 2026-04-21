@@ -36,6 +36,7 @@ CONTINUOUS_WINDOW_S   = 300   # 5-minute analysis windows
 CONTINUOUS_PAUSE_S    = 5     # brief pause between windows (overlap buffer flush)
 FL_UPLOAD_INTERVAL_S  = 3600  # FL batch submissions still happen every hour
 HEARTBEAT_INTERVAL = 30          # write heartbeat every 30s
+CAPTURE_WINDOW_S = 3600
 
 
 # ── Heartbeat writer ──────────────────────────────────────────────────────────

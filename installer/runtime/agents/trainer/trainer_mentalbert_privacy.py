@@ -42,6 +42,9 @@ from core.centralised_receipts import CentralReceiptManager
 from installer.security.integrity import integrity_guard
 integrity_guard()
 
+import logging
+log = logging.getLogger(__name__)
+
 # ---------- Config / Defaults ----------
 MENTALBERT_PRETRAIN = str(Path.home() / ".federated" / "models" / "mentalbert")
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -896,25 +899,89 @@ def orchestrate(
         return {"inference_uri": out_uri, "receipt_uri": ruri, "explainability": explanations}
  
     elif mode == "supervised":
-        texts         = [r.get("transcript") or r.get("text") or "" for r in records]
-        corrected_phq = physician_feedback_cli(preds, texts)
+        texts = [r.get("transcript") or r.get("text") or "" for r in records]
+
+        has_labels = any(r.get("phq_score") is not None for r in records)
+        is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+        # ---------- CASE 1: Interactive + Labels ----------
+        if has_labels and is_interactive:
+            corrected_phq = physician_feedback_cli(preds, texts)
+
+        # ---------- CASE 2: No labels + Non-interactive (daemon mode) ----------
+        elif not has_labels and not is_interactive:
+            log.warning(
+                "[trainer] SUPERVISED mode requested but no PHQ labels in data "
+                "and no interactive terminal available. "
+                "Using model predictions as pseudo-labels. "
+                "These updates may degrade model quality. "
+                "Ensure batch/session data includes PHQ scores from labels.csv."
+            )
+            corrected_phq = [float(p["pred_phq"]) for p in preds]
+
+        # ---------- CASE 3: Labels exist but no interaction OR fallback ----------
+        else:
+            log.info("[trainer] Using existing PHQ labels from records")
+            corrected_phq = []
+            for r in records:
+                val = (
+                    r.get("phq_score")
+                    or r.get("phq")
+                    or r.get("label_phq")
+                    or 0.0
+                )
+                try:
+                    corrected_phq.append(float(val))
+                except Exception:
+                    corrected_phq.append(0.0)
+
+        # ---------- APPLY LABELS (ONLY ONCE) ----------
         for r, cp in zip(records, corrected_phq):
             r["phq_score"] = float(cp)
+
+        # ---------- DATASET CREATION ----------
         ds_sup = MultiModalDataset(records, tokenizer)
-        result = train_model(ds_sup, model, output_dir=str(LOCAL_SAVE_DIR),
-                             epochs=epochs, batch_size=batch_size, lr=lr, device=device)
+
+        # ---------- TRAINING ----------
+        result = train_model(
+            ds_sup,
+            model,
+            output_dir=str(LOCAL_SAVE_DIR),
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            device=device
+        )
+
+        # ---------- LOAD TRAINED MODEL ----------
         model.load_state_dict(torch.load(result["model_path"], map_location=device))
-        after  = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        delta  = compute_state_delta(base_state, after)
+
+        # ---------- DELTA COMPUTATION ----------
+        after = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        delta = compute_state_delta(base_state, after)
+
+        # ---------- SAFETY CONSTRAINTS ----------
         sparams = safety_params or {}
         delta_safe = apply_safety_to_delta(
             delta,
             max_param_change=sparams.get("max_param_change", DEFAULT_MAX_PARAM_CHANGE),
             max_global_norm=sparams.get("max_global_norm", DEFAULT_MAX_GLOBAL_DELTA_NORM),
         )
-        update_uri, receipt_uri = save_encrypted_delta(delta_safe, store, session_id, rm)
+
+        # ---------- ENCRYPT + STORE UPDATE ----------
+        update_uri, receipt_uri = save_encrypted_delta(
+            delta_safe,
+            store,
+            session_id,
+            rm
+        )
+
         print(f"[done] supervised training -> delta saved {update_uri}")
-        return {"local_update_uri": update_uri, "update_receipt_uri": receipt_uri}
+
+        return {
+            "local_update_uri": update_uri,
+            "update_receipt_uri": receipt_uri
+        }
  
     elif mode == "rl":
         texts    = [r.get("transcript") or r.get("text") or "" for r in records]
