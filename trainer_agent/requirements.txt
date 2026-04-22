@@ -1,6 +1,69 @@
-fastapi
-uvicorn
-torch
-pandas
-pyarrow
-cryptography==45.0.6
+# --------------------------------------------------------
+# BE-Major-Project: Full Project Requirements
+# Includes Client, Server, Aggregator, and all Agents (LDA, DP, Enc).
+# --------------------------------------------------------
+
+# Build Tools
+setuptools>=65.5.0
+wheel>=0.41.0
+
+# Deep Learning & PyTorch
+# Note: Use --index-url https://download.pytorch.org/whl/cpu for CPU-only torch
+torch>=2.1.0
+torchaudio>=2.1.0
+torchvision>=0.16.0
+
+# NLP & Transformers
+transformers==4.44.0
+# sentence-transformers 5.1.1 does not exist; pinning to a stable compatible range
+sentence-transformers>=3.0.0
+openai-whisper==20240930
+huggingface_hub>=0.24.0
+tiktoken>=0.7.0
+
+# Audio, Video & Media
+librosa==0.11.0
+soundfile==0.13.1
+webrtcvad==2.0.10
+opencv-python==4.11.0.86
+mediapipe==0.10.11
+pyannote.audio==3.1.1
+
+# Data Science
+numpy==1.26.4
+pandas==2.3.2
+pyarrow==21.0.0
+scikit-learn==1.7.1
+joblib==1.5.1
+
+# Security & Encryption
+cryptography==42.0.5
+# Pyfhel is required for the EncAgent (Homomorphic Encryption)
+Pyfhel
+
+# NLP
+spacy==3.8.7
+nltk==3.9.2
+
+# Cloud & Database
+pymongo==4.7.2
+motor==3.4.0
+boto3==1.40.32
+
+# API & Web
+fastapi==0.116.1
+uvicorn==0.35.0
+
+# Utilities
+# Pydantic updated to v2 to ensure compatibility with pyannote.audio 3.x
+pydantic>=2.0.0
+PyYAML==6.0.2
+typing_extensions>=4.14.1
+python-dotenv==1.0.1
+requests==2.32.5
+tqdm==4.67.1
+
+# gRPC
+protobuf==4.25.3
+grpcio==1.62.2
+grpcio-tools==1.62.2
