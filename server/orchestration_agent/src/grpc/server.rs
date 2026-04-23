@@ -21,7 +21,8 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::Command;  // ← sync, not async
+use std::process::Command;  
+use tokio::process::Command as AsyncCommand; 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -541,32 +542,25 @@ impl Orchestrator for OperationalService {
         let prev_hmac = ledger::get_last_hmac(&self.state.ledger_path(), receipt.round_id);
         let chain_hmac = self.compute_chain_hmac(prev_hmac.as_deref(), &submitted_hash);
 
-        let should_aggregate = {
+        // Atomically claim aggregation responsibility — only ONE task wins this.
+        let won_aggregation = {
             let mut rounds = self.state.rounds.write().unwrap();
             let round = rounds.get_mut(&receipt.round_id)
                 .ok_or_else(|| Status::not_found("round not found"))?;
 
-            if round.state != RoundState::Collecting {
-                return Err(Status::failed_precondition("round not in Collecting state"));
-            }
-
-            let entry = round.updates.iter_mut()
-                .find(|u| u.device_id_hex == device_hex && !u.verified)
-                .ok_or_else(|| Status::not_found("unverified upload not found"))?;
-
-            if round.epsilon_spent + receipt.epsilon_spent > round.epsilon_max {
-                return Err(Status::resource_exhausted(format!(
-                    "epsilon budget exceeded: {:.4} + {:.4} > {:.4}",
-                    round.epsilon_spent, receipt.epsilon_spent, round.epsilon_max
-                )));
-            }
-            round.epsilon_spent += receipt.epsilon_spent;
-            entry.epsilon_spent = receipt.epsilon_spent;
-            entry.verified = true;
-
             let min_updates: usize = std::env::var("FL_MIN_UPDATES_FOR_AGGREGATION")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(3);
-            round.updates.iter().filter(|u| u.verified).count() >= min_updates
+
+            let verified_count = round.updates.iter().filter(|u| u.verified).count();
+            let should_trigger = verified_count >= min_updates
+                && round.state == RoundState::Collecting;  // FIX-AGG-2: only Collecting → Aggregating once
+
+            if should_trigger {
+                round.state = RoundState::Aggregating;     // FIX-AGG-2: mark immediately while holding lock
+                true
+            } else {
+                false
+            }
         };
 
         let record = serde_json::json!({
@@ -586,7 +580,7 @@ impl Orchestrator for OperationalService {
 
         tracing::info!("Receipt verified: device={} round={} eps={:.4}", device_hex, receipt.round_id, receipt.epsilon_spent);
 
-        if should_aggregate {
+        if won_aggregation {
             let state_clone = Arc::clone(&self.state);
             let cfg_clone = self.cfg.clone();
             let round_id_copy = receipt.round_id;
@@ -707,15 +701,15 @@ async fn run_aggregation(
     _cfg: Config,
     round_id: u64,
 ) -> Result<(), Status> {
+    use tokio::process::Command as AsyncCommand;   // FIX-AGG-1: async subprocess
+
     let server_root = &state.server_root;
 
-    // Ensure global_models dir exists
     let gm_dir = state.global_models_dir();
-    fs::create_dir_all(&gm_dir).await.map_err(|e| {
+    tokio::fs::create_dir_all(&gm_dir).await.map_err(|e| {
         Status::internal(format!("mkdir global_models: {}", e))
     })?;
 
-    // Locate aggregator.py relative to executable
     let aggregator_script: PathBuf = {
         let exe = std::env::current_exe().ok().unwrap_or_else(|| PathBuf::from("."));
         exe.ancestors()
@@ -726,12 +720,22 @@ async fn run_aggregation(
 
     if !aggregator_script.exists() {
         tracing::error!("Aggregator script not found: {:?}", aggregator_script);
+        // Reset round state so it can be retried
+        {
+            let mut rounds = state.rounds.write().unwrap();
+            if let Some(r) = rounds.get_mut(&round_id) {
+                if r.state == RoundState::Aggregating {
+                    r.state = RoundState::Collecting;
+                }
+            }
+        }
         return Err(Status::internal("aggregator script missing"));
     }
 
-    tracing::info!("Spawning aggregator: {:?} --round-id {}", aggregator_script, round_id);
+    tracing::info!("Spawning aggregator (async): {:?} --round-id {}", aggregator_script, round_id);
 
-    let output = Command::new("python3")
+    // FIX-AGG-1: tokio::process::Command — non-blocking, won't starve executor
+    let output = AsyncCommand::new("python3")
         .arg(&aggregator_script)
         .arg("--round-id").arg(round_id.to_string())
         .arg("--server-root").arg(server_root.to_str().unwrap_or("."))
@@ -740,34 +744,41 @@ async fn run_aggregation(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()  // ← SYNC call
-        .map_err(|e| {  // ← Handle Result directly, no .await
+        .output()          // ← .await here makes it non-blocking
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to spawn aggregator: {}", e);
             Status::internal("aggregator spawn failed")
         })?;
 
     if !output.status.success() {
-        tracing::error!("Aggregator failed:\nstderr: {}\nstdout: {}",
+        tracing::error!(
+            "Aggregator failed:\nstderr: {}\nstdout: {}",
             String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout));
+            String::from_utf8_lossy(&output.stdout)
+        );
+        // Reset state so a future round can retry
+        {
+            let mut rounds = state.rounds.write().unwrap();
+            if let Some(r) = rounds.get_mut(&round_id) {
+                r.state = RoundState::Collecting;
+            }
+        }
         return Err(Status::internal("aggregation subprocess failed"));
     }
 
-    // Parse GLOBAL_MODEL_PATH=<path> from stdout
     let global_model_path = String::from_utf8_lossy(&output.stdout)
         .lines()
         .find(|l| l.starts_with("GLOBAL_MODEL_PATH="))
         .map(|l| l.trim_start_matches("GLOBAL_MODEL_PATH=").trim().to_string())
         .unwrap_or_else(|| gm_dir.join(format!("round_{}.bin", round_id)).to_string_lossy().into_owned());
 
-    // Update in-memory state: mark round complete, seed next round
     {
         let mut rounds = state.rounds.write().unwrap();
         if let Some(r) = rounds.get_mut(&round_id) {
             r.global_model_path = Some(global_model_path.clone());
             r.state = RoundState::Complete;
         }
-        // Open next round
         let next_id = round_id + 1;
         let eps = std::env::var("FL_EPSILON_MAX")
             .ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(8.0);
@@ -784,7 +795,6 @@ async fn run_aggregation(
         });
     }
 
-    // Log aggregation to ledger
     let record = serde_json::json!({
         "type": "aggregation_complete",
         "round_id": round_id,
