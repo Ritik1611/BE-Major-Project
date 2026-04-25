@@ -14,7 +14,10 @@ import zipfile
 from pathlib import Path
 
 # Stable redirect URL — always points to current FFmpeg release
-FFMPEG_WIN_URL = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-release-essentials.zip"
+FFMPEG_WIN_URL = (
+    "https://www.gyan.dev/ffmpeg/builds/"
+    "ffmpeg-release-essentials.zip"
+)
 
 # Path to store the computed hash after first successful download
 FFMPEG_HASH_STORE = Path.home() / ".federated" / "state" / "ffmpeg_sha256.txt"
