@@ -43,8 +43,13 @@ class EncryptionAgent:
 
         # AWS KMS if needed
         self.kms_key_id = kms_key_id
-        if HAS_BOTO3 and self.mode == "kms_envelope":
-            self.kms = boto3.client("kms")
+        if self.mode == "kms_envelope":
+            if not kms_key_id:
+                raise ValueError("kms_envelope mode requires kms_key_id parameter")
+            if HAS_BOTO3:
+                self.kms = boto3.client("kms")
+            else:
+                raise RuntimeError("boto3 not installed but kms_envelope mode requested")
         else:
             self.kms = None
 

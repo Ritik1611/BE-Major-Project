@@ -63,10 +63,11 @@ def validate_path_within_root(path: Path, root: Path) -> Path:
         # Root doesn't exist yet — create it
         root.mkdir(parents=True, exist_ok=True)
         canonical_root = root.resolve()
-    
     canonical_path = path.resolve(strict=False)
-    
-    if not str(canonical_path).startswith(str(canonical_root)):
+    # Use relative_to() which raises ValueError if path is not within root
+    try:
+        canonical_path.relative_to(canonical_root)
+    except ValueError:
         raise ValueError(
             f"Path traversal rejected: {canonical_path} is not within {canonical_root}"
         )
@@ -76,8 +77,9 @@ def validate_server_root(server_root: str) -> Path:
     """Validate --server-root arg is within ~/.federated/."""
     root = Path(server_root).expanduser().resolve()
     federated_root = Path.home() / ".federated"
-    
-    if not str(root).startswith(str(federated_root)):
+    try:
+        root.relative_to(federated_root)
+    except ValueError:
         raise ValueError(
             f"server-root must be within ~/.federated/: got {root}"
         )
@@ -145,19 +147,10 @@ def encrypt_and_save_global_model(
         return str(output_path.resolve())
         
     except Exception as e:
-        log.error("Failed to save global model: %s — falling back to plain file", e)
-        # Fallback: save unencrypted
-        try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            import io
-            buffer = io.BytesIO()
-            torch.save(state_dict, buffer, _use_new_zipfile_serialization=False)
-            output_path.write_bytes(buffer.getvalue())
-            log.info("Fallback: plain global model saved to %s", output_path)
-            return str(output_path.resolve())
-        except Exception as e2:
-            log.critical("FATAL: Could not save global model (encrypted or plain): %s", e2)
-            raise
+        log.critical("FATAL: Could not save global model encrypted: %s", e)
+        raise RuntimeError(
+            f"Refusing to save global model in plaintext. Encryption failed: {e}"
+        )
 
 # ── Trimmed mean aggregation (memory-safe, parameter-by-parameter) ────────────
 def trimmed_mean_aggregate(

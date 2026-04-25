@@ -31,7 +31,8 @@ from typing import List, Dict, Any, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoModel, AutoTokenizer, AdamW
+from transformers import AutoModel, AutoTokenizer
+from torch.optim import AdamW
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -854,7 +855,7 @@ def orchestrate(
     # ── Phase 10: warm-start from global model ────────────────────────────────
     if global_model_path and Path(global_model_path).exists():
         try:
-            global_state = torch.load(global_model_path, map_location=device)
+            global_state = torch.load(global_model_path, map_location=device, weights_only=True)
             # Support both raw state_dict and wrapped {"state_dict": ...} formats
             if isinstance(global_state, dict) and "state_dict" in global_state:
                 global_state = global_state["state_dict"]

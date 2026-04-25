@@ -306,7 +306,7 @@ def _diarize_audio(audio_wav: str, cfg: dict) -> List[Dict[str, Any]]:
                 log.warning("HF_TOKEN not set — pyannote diarization unavailable")
             else:
                 pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization", use_auth_token=hf_token
+                    "pyannote/speaker-diarization", token=hf_token
                 )
                 diar = pipeline(audio_wav)
                 segs = [

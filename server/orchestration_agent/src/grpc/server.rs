@@ -539,6 +539,19 @@ impl Orchestrator for OperationalService {
             return Err(Status::permission_denied("payload_hash does not match uploaded data"));
         }
 
+        {
+            let mut rounds = self.state.rounds.write().unwrap();
+            if let Some(round) = rounds.get_mut(&receipt.round_id) {
+                if let Some(entry) = round.updates.iter_mut()
+                    .find(|u| u.device_id_hex == device_hex)
+                {
+                    // CRITICAL: mark this device's upload as verified after sig check passes
+                    entry.verified = true;
+                    entry.epsilon_spent = receipt.epsilon_spent;
+                }
+            }
+        }
+
         let prev_hmac = ledger::get_last_hmac(&self.state.ledger_path(), receipt.round_id);
         let chain_hmac = self.compute_chain_hmac(prev_hmac.as_deref(), &submitted_hash);
 
@@ -550,6 +563,13 @@ impl Orchestrator for OperationalService {
 
             let min_updates: usize = std::env::var("FL_MIN_UPDATES_FOR_AGGREGATION")
                 .ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+            
+            // CRITICAL FIX: mark this device's upload as verified after sig check passes
+            if let Some(entry) = round.updates.iter_mut().find(|u| u.device_id_hex == device_hex) {
+                entry.verified = true;
+                entry.epsilon_spent = receipt.epsilon_spent;
+            }
+            let verified_count = round.updates.iter().filter(|u| u.verified).count();
 
             let verified_count = round.updates.iter().filter(|u| u.verified).count();
             let should_trigger = verified_count >= min_updates

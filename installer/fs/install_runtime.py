@@ -1,17 +1,21 @@
 """
-install_runtime.py  — FIXED VERSION
+install_runtime.py  — FIXED VERSION 3
 
-Key fixes applied (every line reviewed):
-  FIX-1: install_mentalbert_model() removed from install_runtime().
-          It is now called by installer_core.setup_software() AFTER
-          create_venv() and install_python_deps() so that
-          huggingface_hub / transformers are available in the venv.
-  FIX-2: Step 10 now also writes ~/.federated/installer/__init__.py
-          so that `from installer.security.integrity import ...` works
-          at runtime (federated_client.py import chain).
-  FIX-3: Also writes ~/.federated/runtime/__init__.py so that relative
-          imports inside runtime_guard.py (`from .tpm_guard import ...`)
-          resolve correctly when runtime is imported as a package.
+FIXES in this version:
+  FIX-RMTREE-1 (CURRENT ERROR / WinError 5):
+    Every shutil.rmtree() call now passes an onerror handler that strips
+    the read-only / immutable attribute before deletion.
+    Root cause: integrity.py's freeze_all_agent_files() calls
+    path.chmod(0o444) on every agent .py file after the first successful
+    install.  On Windows, shutil.rmtree() raises PermissionError (WinError 5)
+    when it hits a read-only file because it does NOT clear the attribute
+    automatically.  The fix is a one-line onerror= argument on every rmtree.
+
+  FIX-RMTREE-2:
+    install_windows_deps() also called shutil.rmtree without the handler.
+    Fixed with the same helper.
+
+  FIX-1 through FIX-3 from the previous version are preserved unchanged.
 """
 
 import shutil
@@ -19,6 +23,7 @@ import stat
 import platform
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 IS_WINDOWS = platform.system().lower() == "windows"
@@ -54,6 +59,37 @@ def _chmod_tree(root: Path):
             pass
 
 
+# ── FIX-RMTREE-1: safe rmtree that handles read-only files on Windows ─────────
+
+def _on_rmtree_error(func, path, exc_info):
+    """
+    onerror callback for shutil.rmtree.
+
+    When a file is read-only (chmod 0o444) — set by integrity.py's
+    freeze_all_agent_files() after the first install — Windows raises
+    PermissionError (WinError 5).  This handler strips the read-only
+    attribute and retries the operation.
+
+    Parameters mirror the shutil.rmtree onerror contract:
+      func  — the failing os function (e.g. os.unlink, os.rmdir)
+      path  — the path that failed
+      exc_info — sys.exc_info() tuple
+    """
+    try:
+        # Make the path writable then retry
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        func(path)
+    except Exception:
+        # If still fails, log and continue — don't abort the whole install
+        print(f"[WARN] Could not remove {path}: {exc_info[1]}", flush=True)
+
+
+def _safe_rmtree(path: Path):
+    """shutil.rmtree with read-only handling for Windows and Linux."""
+    if path.exists():
+        shutil.rmtree(path, onerror=_on_rmtree_error)
+
+
 # ── Venv python path ──────────────────────────────────────────────────────────
 
 def _venv_python() -> Path:
@@ -65,10 +101,6 @@ def _venv_python() -> Path:
 # ── MentalBERT installer ──────────────────────────────────────────────────────
 
 def _is_real_model(directory: Path) -> bool:
-    """
-    Return True only if directory contains actual model weights
-    (not git-lfs pointer files).  LFS pointers are tiny text files ~130 bytes.
-    """
     model_files = (
         list(directory.glob("*.bin"))
         + list(directory.glob("*.safetensors"))
@@ -80,31 +112,19 @@ def _is_real_model(directory: Path) -> bool:
 
 
 def install_mentalbert_model():
-    """
-    FIX-1: This function is NO LONGER called from install_runtime().
-    It must be called by installer_core.setup_software() AFTER
-    create_venv() and install_python_deps() complete, so that
-    huggingface_hub and transformers are present in the venv.
-    """
     MODEL_DST = BASE_DIR / "models" / "mentalbert"
     MODEL_SRC = RUNTIME_SRC / "models" / "mentalbert"
     MODEL_DST.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[MODEL] Checking MentalBERT at {MODEL_DST}", flush=True)
-    print("[DEBUG] MODEL_SRC:", MODEL_SRC)
-    print("[DEBUG] MODEL_SRC exists:", MODEL_SRC.exists())
 
     if MODEL_DST.exists():
         if _is_real_model(MODEL_DST):
             print("[MODEL] Already installed and valid, skipping")
             return
         else:
-            print(
-                "[MODEL] Found incomplete model (git-lfs pointer files detected). "
-                "Removing and re-downloading…",
-                flush=True,
-            )
-            shutil.rmtree(MODEL_DST)
+            print("[MODEL] Found incomplete model — removing and re-downloading…", flush=True)
+            _safe_rmtree(MODEL_DST)          # FIX-RMTREE-1
 
     if MODEL_SRC.exists() and _is_real_model(MODEL_SRC):
         print("[MODEL] Installing from installer payload…")
@@ -113,13 +133,8 @@ def install_mentalbert_model():
         return
 
     if MODEL_SRC.exists():
-        print(
-            "[WARN] Installer payload contains git-lfs pointer files, not real weights. "
-            "Will download from HuggingFace Hub instead.",
-            flush=True,
-        )
+        print("[WARN] Installer payload contains git-lfs pointer files, not real weights.", flush=True)
 
-    # ── venv python is now guaranteed to exist (called after create_venv+deps) ─
     python_cmd = str(_venv_python()) if _venv_python().exists() else sys.executable
 
     download_script = r'''
@@ -194,18 +209,13 @@ def install_windows_deps():
     dst_root = BASE_DIR / "deps"
     dst = dst_root / "windows"
 
-    print("[DEBUG] RUNTIME_SRC:", RUNTIME_SRC)
-    deps_dir = RUNTIME_SRC / "deps"
-    if deps_dir.exists():
-        print("[DEBUG] Contents:", list(deps_dir.iterdir()))
-
     if dst.exists():
-        shutil.rmtree(dst)
+        _safe_rmtree(dst)               # FIX-RMTREE-1
 
     if dst_root.exists():
         for item in dst_root.iterdir():
             if item.name == "windows":
-                shutil.rmtree(item)
+                _safe_rmtree(item)      # FIX-RMTREE-1
 
     shutil.copytree(src, dst)
     _chmod_tree(dst)
@@ -240,9 +250,6 @@ def install_runtime():
         signer_src = RUNTIME_SRC / "windows_signer.exe"
         signer_dst = bin_dir / "windows_signer.exe"
 
-        print("[DEBUG] Copying Windows signer from:", signer_src)
-        print("[DEBUG] Exists?:", signer_src.exists())
-
         if not signer_src.exists():
             raise RuntimeError("windows_signer.exe missing from runtime")
 
@@ -251,13 +258,14 @@ def install_runtime():
         print("[OK] Windows TPM signer installed")
 
     # 2. agents
+    # FIX-RMTREE-1: was shutil.rmtree(agents_dst) — fails WinError 5 on re-install
+    # because integrity.py set all .py files to 0o444 (read-only) after first install.
     agents_dst = BASE_DIR / "agents"
-    if agents_dst.exists():
-        shutil.rmtree(agents_dst)
+    _safe_rmtree(agents_dst)            # ← THE FIX FOR THE CURRENT ERROR
     shutil.copytree(RUNTIME_SRC / "agents", agents_dst)
     _chmod_tree(agents_dst)
 
-    # FIX-2a: ensure agents package __init__.py files exist so imports work
+    # FIX-2a: ensure agents package __init__.py files exist
     for pkg_dir in [agents_dst,
                     agents_dst / "lda",
                     agents_dst / "lda" / "pipelines",
@@ -274,15 +282,13 @@ def install_runtime():
 
     # 3. configs
     configs_dst = BASE_DIR / "configs"
-    if configs_dst.exists():
-        shutil.rmtree(configs_dst)
+    _safe_rmtree(configs_dst)           # FIX-RMTREE-1
     shutil.copytree(RUNTIME_SRC / "configs", configs_dst)
     _chmod_tree(configs_dst)
 
     # 4. runtime guards & helpers
     runtime_dst = BASE_DIR / "runtime"
-    if runtime_dst.exists():
-        shutil.rmtree(runtime_dst)
+    _safe_rmtree(runtime_dst)           # FIX-RMTREE-1
     runtime_dst.mkdir(parents=True, exist_ok=True)
 
     for f in RUNTIME_SRC.glob("*.py"):
@@ -291,9 +297,7 @@ def install_runtime():
         shutil.copy2(f, runtime_dst / f.name)
     _chmod_tree(runtime_dst)
 
-    # FIX-3: create runtime/__init__.py so relative imports inside
-    # runtime_guard.py (`from .tpm_guard import ...`) resolve correctly
-    # when `runtime` is imported as a package from federated_client.py.
+    # FIX-3: create runtime/__init__.py
     runtime_init = runtime_dst / "__init__.py"
     if not runtime_init.exists():
         runtime_init.write_text("")
@@ -304,12 +308,10 @@ def install_runtime():
 
     # 5. grpc stubs
     grpc_dst = BASE_DIR / "runtime" / "grpc"
-    if grpc_dst.exists():
-        shutil.rmtree(grpc_dst)
+    _safe_rmtree(grpc_dst)              # FIX-RMTREE-1
     shutil.copytree(RUNTIME_SRC / "grpc", grpc_dst)
     _chmod_tree(grpc_dst)
 
-    # FIX-2b: grpc sub-package __init__.py
     grpc_init = grpc_dst / "__init__.py"
     if not grpc_init.exists():
         grpc_init.write_text("")
@@ -322,12 +324,10 @@ def install_runtime():
     core_src = RUNTIME_SRC / "core"
     core_dst = BASE_DIR / "core"
     if core_src.exists():
-        if core_dst.exists():
-            shutil.rmtree(core_dst)
+        _safe_rmtree(core_dst)          # FIX-RMTREE-1
         shutil.copytree(core_src, core_dst)
         _chmod_tree(core_dst)
 
-    # FIX-2c: core package __init__.py
     core_init = core_dst / "__init__.py"
     if not core_init.exists():
         core_init.write_text("")
@@ -336,7 +336,7 @@ def install_runtime():
         except Exception:
             pass
 
-    # 7. Windows native deps (OpenFace + openSMILE)
+    # 7. Windows native deps
     install_windows_deps()
 
     # 8. CA certificate
@@ -368,8 +368,7 @@ def install_runtime():
     installer_security_dst = BASE_DIR / "installer" / "security"
 
     if installer_security_src.exists():
-        if installer_security_dst.exists():
-            shutil.rmtree(installer_security_dst.parent)
+        _safe_rmtree(installer_security_dst.parent)   # FIX-RMTREE-1
         installer_security_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(installer_security_src, installer_security_dst)
         _chmod_tree(installer_security_dst)
@@ -377,11 +376,6 @@ def install_runtime():
     else:
         print("[WARN] installer/security not found in installer package")
 
-    # FIX-2d: CRITICAL — create ~/.federated/installer/__init__.py so that
-    # `from installer.security.integrity import integrity_guard` resolves.
-    # Without this, every agent (dp_agent, enc_agent, trainer, lda/main)
-    # that calls `from installer.security.integrity import integrity_guard`
-    # raises ModuleNotFoundError at runtime.
     installer_pkg = BASE_DIR / "installer"
     installer_pkg.mkdir(parents=True, exist_ok=True)
     installer_init = installer_pkg / "__init__.py"
@@ -392,8 +386,6 @@ def install_runtime():
         except Exception:
             pass
 
-    # FIX-2e: also ensure installer/security/__init__.py is present
-    # (it should be copied above, but guarantee it exists)
     sec_init = installer_security_dst / "__init__.py"
     if not sec_init.exists():
         sec_init.write_text(
@@ -404,9 +396,5 @@ def install_runtime():
             sec_init.chmod(0o600)
         except Exception:
             pass
-
-    # NOTE: install_mentalbert_model() is intentionally NOT called here.
-    # It is called by installer_core.setup_software() AFTER install_python_deps()
-    # so the venv python has huggingface_hub and transformers available.
 
     print("[OK] Runtime installed successfully")

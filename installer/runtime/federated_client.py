@@ -148,6 +148,11 @@ def main():
         if not SERVER_ADDR:
             SERVER_ADDR = input("Enter server address (host:port): ").strip()
 
+        if not SERVER_ADDR or ":" not in SERVER_ADDR:
+            log.error("Invalid server address — must be host:port (e.g. 192.168.1.7:50052)")
+            health.unhealthy("invalid server address")
+            sys.exit(1)
+
         # ── Phase 3: dual-channel gRPC ────────────────────────────────────────
         stub = create_grpc_stub(SERVER_ADDR)
 

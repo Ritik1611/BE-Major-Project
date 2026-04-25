@@ -54,7 +54,7 @@ from security.tpm_attestation import (
     provision_tpm_identity,
     get_device_pubkey_installer_safe,
 )
-from security.tpm_seal import seal_master_secret
+from security.tpm_seal import seal_master_secret, create_master_secret_windows
 from security.deps_windows import verify_windows_deps, verify_python_and_pip
 
 from runtime.grpc.orchestrator_pb2_grpc import OrchestratorStub
@@ -713,7 +713,6 @@ def finalize_install(device_pubkey: bytes, otp: str, server_addr: str):
     logging.info("[11] Sealing master secret")
     try:
         if IS_WINDOWS:
-            from installer.security.tpm_seal import create_master_secret_windows
             create_master_secret_windows()
         else:
             seal_master_secret()

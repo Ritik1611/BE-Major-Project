@@ -156,6 +156,11 @@ class HealthReporter:
         HEALTH_FILE.parent.mkdir(parents=True, exist_ok=True)
         HEALTH_FILE.write_text(json.dumps(doc, indent=2))
 
+        try:
+            os.chmod(HEALTH_FILE, 0o600)
+        except Exception:
+            pass
+
     def healthy(self, **extra):
         self._write("healthy", extra)
 

@@ -168,7 +168,7 @@ class DPAgent:
 
         buf = io.BytesIO(decrypted)
         try:
-            state_dict = torch.load(buf, map_location="cpu", weights_only=False)
+            state_dict = torch.load(buf, map_location="cpu", weights_only=True)
         except Exception as e:
             raise RuntimeError(f"Failed to load state_dict from {path}: {e}")
 

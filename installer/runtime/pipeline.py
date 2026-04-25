@@ -369,7 +369,7 @@ def run_pipeline(
 
         from runtime.runtime_guard import generate_receipt_nonce
 
-        nonce = secrets.token_hex(32)
+        nonce = generate_receipt_nonce()
 
         receipt = Receipt(
             device_id=device_id,
