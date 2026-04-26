@@ -215,54 +215,62 @@ def rdp_to_dp(noise_mult: float, sample_rate: float,
               steps: int, delta: float, alpha_range=(2, 512)) -> PrivacyAccountantResult:
     """
     Full RDP → (ε, δ)-DP conversion with optimal α search.
-    Matches fl_algorithm_comparison.py::rdp_to_dp() but returns richer object.
-
-    Reference: Mironov (2017), Wang et al. (2019) privacy amplification by subsampling.
+    FIX: Added overflow protection for math.exp() and use log1p/expm1 for stability.
     """
-    best_eps   = math.inf
+    if noise_mult <= 0 or sample_rate <= 0:
+        return PrivacyAccountantResult(
+            epsilon=float("inf"), delta=delta, noise_mult=noise_mult,
+            clip_norm=1.0, sample_rate=sample_rate, steps=steps,
+            best_alpha=-1, rdp_epsilon=float("inf"),
+            mechanism="Gaussian", composition="advanced_RDP",
+            amplified_eps=float("inf"),
+        )
+
+    best_eps = math.inf
     best_alpha = -1
-    best_rdp   = math.inf
+    best_rdp = math.inf
 
     for alpha in range(*alpha_range):
-        # Privacy amplification by Poisson subsampling (Wang et al. 2019):
-        # RDP_amplified(α) ≤ (1/α-1) log[(1-q)^(α-1)·(α·q·e^{RDP(α+1)}-(α-1)·q·e^{RDP(α)}+1-q)
-        # Conservative approximation: RDP_amp ≈ 2·q^2·RDP(α)  (tight for q≪1)
-        q     = sample_rate
+        q = sample_rate
         rdp_a = rdp_epsilon(noise_mult, alpha) * steps
-        # Amplification: tight for small q (Theorem 9 of Wang et al.)
-        if q < 0.5:
-            rdp_amp = min(rdp_a,
-                          2 * q ** 2 * rdp_a,
-                          q * rdp_a + math.log(1 + q * (math.exp(rdp_a) - 1)))
+
+        # Privacy amplification by Poisson subsampling (Wang et al. 2019)
+        # FIX: Avoid overflow in math.exp() by checking threshold and using stable functions
+        if q < 0.5 and rdp_a < 700:  # 700 is safe threshold (exp(709) ~ max float64)
+            # Use log1p/expm1 for numerical stability: log(1+x) and exp(x)-1
+            rdp_amp = min(
+                rdp_a,
+                2 * q ** 2 * rdp_a,
+                q * rdp_a + math.log1p(q * math.expm1(rdp_a))  # Stable computation
+            )
         else:
+            # Fallback: no amplification when q is large or rdp_a would overflow
             rdp_amp = rdp_a
 
         # Convert RDP(α) → (ε, δ)
         eps_a = rdp_amp + math.log(1 / delta) / (alpha - 1)
         if eps_a < best_eps:
-            best_eps   = eps_a
+            best_eps = eps_a
             best_alpha = alpha
-            best_rdp   = rdp_amp
+            best_rdp = rdp_amp
 
-    # Zero-Concentrated DP (zCDP) Gaussian: ρ = 1/(2σ²) with σ=noise_mult
-    rho    = 1 / (2 * noise_mult ** 2) * steps
-    # zCDP → (ε, δ): ε = ρ + 2√(ρ ln(1/δ))
+    # Zero-Concentrated DP (zCDP) Gaussian: ρ = 1/(2σ²)
+    rho = 1 / (2 * noise_mult ** 2) * steps
     zcdp_eps = rho + 2 * math.sqrt(rho * math.log(1 / delta))
-
     final_eps = min(best_eps, zcdp_eps)
 
     return PrivacyAccountantResult(
-        epsilon      = round(final_eps, 6),
-        delta        = delta,
-        noise_mult   = noise_mult,
-        clip_norm    = 1.0,   # standard
-        sample_rate  = sample_rate,
-        steps        = steps,
-        best_alpha   = best_alpha,
-        rdp_epsilon  = round(best_rdp, 6),
-        mechanism    = "Gaussian",
-        composition  = "advanced_RDP",
-        amplified_eps= round(best_eps, 6),
+        epsilon=round(final_eps, 6),
+        delta=delta,
+        noise_mult=noise_mult,
+        clip_norm=1.0,
+        sample_rate=sample_rate,
+        steps=steps,
+        best_alpha=best_alpha,
+        rdp_epsilon=round(best_rdp, 6),
+        mechanism="Gaussian",
+        composition="advanced_RDP",
+        amplified_eps=round(best_eps, 6),
     )
 
 
