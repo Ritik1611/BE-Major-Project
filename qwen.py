@@ -1630,53 +1630,237 @@ def run_federated_scaffold(
 # SECTION 11: VISUALISATION
 # ==============================================================================
 
-COLORS = plt.cm.tab10.colors if HAS_MATPLOTLIB else []
+# ── Clean display-name mapping ────────────────────────────────────────────────
+# Maps internal result-dict keys → short, readable legend labels.
+# Any key NOT in this dict falls back to the raw key string.
+LABEL_MAP: Dict[str, str] = {
+    # ── Figure 1: main algorithm comparison ──────────────────────────────────
+    "fedavg_mean_noDP":    "FedAvg (No DP)",
+    "fedavg_mean":         "FedAvg + DP",
+    "fedprox_mean":        "FedProx + DP",
+    "fedadam_mean":        "FedAdam + DP",
+    "fedyogi_mean":        "FedYogi + DP",
+    "scaffold_mean":       "SCAFFOLD + DP",
+    "scaffold_mean_noDP":  "SCAFFOLD (No DP)",
+    # ── Figure 2: aggregation variants ───────────────────────────────────────
+    "fedavg_trimmed_mean": "Trimmed Mean",
+    "fedavg_median":       "Coord.-wise Median",
+    "fedavg_krum":         "Krum",
+    # ── Figure 2: DP noise-multiplier sweep ──────────────────────────────────
+    "fedavg_mean_nm0.5":   "FedAvg nm=0.5 (high ε)",
+    "fedavg_mean_nm1.0":   "FedAvg nm=1.0",
+    "fedavg_mean_nm1.5":   "FedAvg nm=1.5 (low ε)",
+}
+
+# Figure-1 keys (main algorithms); everything else lands in Figure 2.
+_FIG1_KEYS = {
+    "fedavg_mean_noDP",
+    "fedavg_mean",
+    "fedprox_mean",
+    "fedadam_mean",
+    "fedyogi_mean",
+    "scaffold_mean",
+    "scaffold_mean_noDP",
+}
+
+# Colour palette — distinct, colourblind-friendly subset of tab10
+_PALETTE = [
+    "#1f77b4",  # blue
+    "#ff7f0e",  # orange
+    "#2ca02c",  # green
+    "#d62728",  # red
+    "#9467bd",  # purple
+    "#8c564b",  # brown
+    "#e377c2",  # pink
+    "#17becf",  # teal
+]
 
 
-def plot_comparison(all_results: Dict[str, List[RoundResult]]):
-    if not HAS_MATPLOTLIB:
+def _nice(key: str) -> str:
+    """Return the clean display name for a result key."""
+    return LABEL_MAP.get(key, key)
+
+
+def _make_figure(
+    subset: Dict[str, List[RoundResult]],
+    suptitle: str,
+    out_path: Path,
+) -> None:
+    """
+    Render a 2×2 panel figure (Accuracy | F1 | Privacy Budget | Privacy-Utility)
+    for the given subset of results and save to *out_path*.
+
+    Design principles applied here (per reviewer feedback):
+      • Maximum 7 series per figure — no cluttered overlapping lines.
+      • Legend uses clean human-readable names (via LABEL_MAP).
+      • DP runs drawn as dashed lines; non-DP as solid — easy to distinguish.
+      • Legend placed outside the axes so it never overlaps data.
+      • Consistent colour assignment across all four panels.
+    """
+    if not subset:
+        log.warning("No data for figure: %s — skipping.", suptitle)
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-    fig.suptitle(
-        "FL Algorithm Comparison -- DAIC-WOZ Depression Detection (MentalBERT)",
-        fontsize=13, fontweight="bold",
-    )
+    fig, axes = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle(suptitle, fontsize=13, fontweight="bold", y=1.01)
 
     ax_acc, ax_f1, ax_eps, ax_pvt = axes.flat
 
-    for idx, (lbl, rlist) in enumerate(all_results.items()):
-        rounds = [r.round_num for r in rlist]
-        color  = COLORS[idx % len(COLORS)]
-        ls     = "--" if rlist[0].use_dp else "-"
+    colour_cycle = {}   # key → colour (stable across panels)
+    for idx, key in enumerate(subset):
+        colour_cycle[key] = _PALETTE[idx % len(_PALETTE)]
+
+    has_dp_series = False
+
+    for key, rlist in subset.items():
+        if not rlist:
+            continue
+        rounds   = [r.round_num for r in rlist]
+        color    = colour_cycle[key]
+        ls       = "-" if not rlist[0].use_dp else "--"
+        lw       = 2.2 if not rlist[0].use_dp else 1.8
+        disp_lbl = _nice(key)
 
         ax_acc.plot(rounds, [r.test_acc for r in rlist],
-                    color=color, ls=ls, lw=2, label=lbl)
+                    color=color, ls=ls, lw=lw, label=disp_lbl)
         ax_f1.plot(rounds,  [r.test_f1  for r in rlist],
-                   color=color, ls=ls, lw=2, label=lbl)
-        if rlist[0].use_dp:
-            ax_eps.plot(rounds, [r.epsilon for r in rlist],
-                        color=color, ls=ls, lw=2, label=lbl)
-            ax_pvt.scatter(rlist[-1].epsilon, rlist[-1].test_acc,
-                           color=color, s=100, zorder=5, label=lbl)
+                   color=color, ls=ls, lw=lw, label=disp_lbl)
 
-    for ax, title, ylabel in [
-        (ax_acc, "Test Accuracy",                       "Accuracy"),
-        (ax_f1,  "F1 Score (Depression=1)",             "F1"),
-        (ax_eps, "Privacy Budget eps (DP runs only)",   "eps"),
-        (ax_pvt, "Privacy-Utility Trade-off (DP runs)", "Final Accuracy"),
-    ]:
-        ax.set_title(title)
-        ax.set_xlabel("Round" if ax is not ax_pvt else "Final eps")
-        ax.set_ylabel(ylabel)
-        ax.legend(fontsize=6, ncol=2)
-        ax.grid(True, alpha=0.3)
+        if rlist[0].use_dp:
+            has_dp_series = True
+            ax_eps.plot(rounds, [r.epsilon for r in rlist],
+                        color=color, ls=ls, lw=lw, label=disp_lbl)
+            ax_pvt.scatter(
+                rlist[-1].epsilon, rlist[-1].test_acc,
+                color=color, s=120, zorder=5, label=disp_lbl,
+                edgecolors="white", linewidths=0.6,
+            )
+            # Annotate final value in the accuracy & F1 panels
+            ax_acc.annotate(
+                f"{rlist[-1].test_acc:.2f}",
+                xy=(rounds[-1], rlist[-1].test_acc),
+                fontsize=6.5, color=color, ha="left", va="bottom",
+            )
+
+    # ── Axis styling ─────────────────────────────────────────────────────────
+    _style_ax(ax_acc, "Test Accuracy",              "Round", "Accuracy")
+    _style_ax(ax_f1,  "F1 Score (Depressed = 1)",   "Round", "F1")
+    _style_ax(ax_eps, "Privacy Budget ε (DP only)", "Round", "ε (epsilon)")
+    _style_ax(ax_pvt, "Privacy-Utility Trade-off",  "Final ε", "Final Accuracy")
+
+    if not has_dp_series:
+        ax_eps.set_visible(False)
+        ax_pvt.set_visible(False)
+
+    # ── Shared legend — placed below all panels so it never overlaps ─────────
+    handles, labels = ax_acc.get_legend_handles_labels()
+    fig.legend(
+        handles, labels,
+        loc="lower center",
+        ncol=min(len(subset), 4),
+        fontsize=9,
+        frameon=True,
+        framealpha=0.9,
+        bbox_to_anchor=(0.5, -0.06),
+    )
+
+    # ── Solid / dashed key ───────────────────────────────────────────────────
+    from matplotlib.lines import Line2D
+    style_legend = [
+        Line2D([0], [0], color="gray", lw=2,   ls="-",  label="No DP"),
+        Line2D([0], [0], color="gray", lw=1.8, ls="--", label="With DP"),
+    ]
+    ax_acc.legend(
+        handles=style_legend,
+        fontsize=7, loc="upper right",
+        framealpha=0.7, handlelength=2,
+    )
 
     plt.tight_layout()
-    out = RESULTS_DIR / "fl_daic_comparison.png"
-    plt.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close()
-    log.info("Plot saved -> %s", out)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Figure saved -> %s", out_path)
+
+
+def _style_ax(ax, title: str, xlabel: str, ylabel: str) -> None:
+    """Apply consistent axis styling."""
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=6)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.tick_params(labelsize=8)
+    ax.grid(True, alpha=0.25, linestyle=":")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def plot_comparison(all_results: Dict[str, List[RoundResult]]) -> None:
+    """
+    UPDATED (per reviewer feedback — fixes clutter & overloaded legend):
+
+    Splits the original single cluttered figure into TWO focused figures:
+
+    Figure 1 — Algorithm Comparison (fl_daic_fig1_algorithms.png)
+        Shows the 5–6 main FL algorithms side-by-side (FedAvg, FedProx,
+        FedAdam, FedYogi, SCAFFOLD) including the No-DP baseline.
+        Purpose: "Which FL algorithm works best?"
+
+    Figure 2 — DP Ablation & Robust Aggregation (fl_daic_fig2_dp_ablation.png)
+        Shows (a) the noise-multiplier sweep (nm=0.5/1.0/1.5) and
+        (b) Byzantine-robust aggregation variants (Trimmed Mean, Median, Krum).
+        Purpose: "How does DP noise level / aggregation strategy affect results?"
+
+    Both figures share the same 2×2 panel layout (Accuracy | F1 | ε | Trade-off)
+    and use clean display names from LABEL_MAP.  Each figure has at most 7 series
+    so no panel is cluttered.
+    """
+    if not HAS_MATPLOTLIB:
+        log.warning("matplotlib not available — skipping plots.")
+        return
+
+    # ── Split results into two groups ─────────────────────────────────────────
+    fig1_data: Dict[str, List[RoundResult]] = {}
+    fig2_data: Dict[str, List[RoundResult]] = {}
+
+    for key, rlist in all_results.items():
+        if key in _FIG1_KEYS:
+            fig1_data[key] = rlist
+        else:
+            fig2_data[key] = rlist
+
+    # ── Figure 1: main algorithm comparison ──────────────────────────────────
+    _make_figure(
+        subset   = fig1_data,
+        suptitle = (
+            "Figure 1 — FL Algorithm Comparison\n"
+            "DAIC-WOZ Depression Detection · MentalBERT"
+        ),
+        out_path = RESULTS_DIR / "fl_daic_fig1_algorithms.png",
+    )
+
+    # ── Figure 2: DP ablation + robust aggregation ───────────────────────────
+    if fig2_data:
+        _make_figure(
+            subset   = fig2_data,
+            suptitle = (
+                "Figure 2 — DP Noise Sensitivity & Robust Aggregation\n"
+                "DAIC-WOZ Depression Detection · MentalBERT"
+            ),
+            out_path = RESULTS_DIR / "fl_daic_fig2_dp_ablation.png",
+        )
+    else:
+        log.info("No DP-sweep / robust-aggregation results — Figure 2 skipped.")
+
+    # ── Legacy combined figure (kept for backward compatibility) ─────────────
+    # Combines both groups into one figure with reduced line width so existing
+    # pipelines that read fl_daic_comparison.png continue to work.
+    _make_figure(
+        subset   = all_results,
+        suptitle = (
+            "FL Algorithm Comparison — DAIC-WOZ Depression Detection (MentalBERT)\n"
+            "(combined overview — see fig1/fig2 for cleaner per-group views)"
+        ),
+        out_path = RESULTS_DIR / "fl_daic_comparison.png",
+    )
 
 
 def latex_summary(all_results: Dict[str, List[RoundResult]]) -> str:

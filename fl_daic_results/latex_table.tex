@@ -5,18 +5,18 @@
 \toprule
 Algorithm & Aggregation & DP & Final Acc & F1 & $\varepsilon$ & Rounds \\
 \midrule
-FEDADAM & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDAVG & krum & ✓ & 0.3333 & 0.5000 & 197.46 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDAVG & mean & ✗ & 0.6667 & 0.0000 & — & 30 \\
-FEDAVG & median & ✓ & 0.3333 & 0.5000 & 197.46 & 30 \\
-FEDAVG & trimmed mean & ✓ & 0.0000 & 0.0000 & 197.46 & 30 \\
-FEDPROX & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDYOGI & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-SCAFFOLD & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
+FEDADAM & mean & Y & 0.4615 & 0.3636 & 109.93 & 20 \\
+FEDAVG & mean & Y & 0.5385 & 0.6667 & 109.93 & 20 \\
+FEDAVG & mean & N & 0.4615 & 0.3636 & -- & 20 \\
+FEDAVG & median & Y & 0.4615 & 0.6316 & 109.93 & 20 \\
+FEDAVG & trimmed mean & Y & 0.5385 & 0.6667 & 109.93 & 20 \\
+FEDPROX & mean & Y & 0.5385 & 0.6667 & 109.93 & 20 \\
+FEDYOGI & mean & Y & 0.4615 & 0.6316 & 109.93 & 20 \\
+SCAFFOLD & mean & Y & 0.6154 & 0.7059 & 109.93 & 20 \\
 \bottomrule
 \end{tabular}
 \end{table}
+
 \begin{table}[htbp]
 \centering
 \caption{DP Parameter Sweep (FedAvg, mean aggregation)}
@@ -24,17 +24,9 @@ SCAFFOLD & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
 \toprule
 Experiment & Aggregation & DP & Final Acc & F1 & $\varepsilon$ & Rounds \\
 \midrule
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 79.27 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 296.19 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 145.58 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 197.46 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 89.29 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 57.83 & 30 \\
-FEDAVG & mean & ✓ & 0.6667 & 0.0000 & 42.62 & 30 \\
+FEDAVG & mean & Y & 0.4615 & 0.6316 & 306.24 & 20 \\
+FEDAVG & mean & Y & 0.5385 & 0.6667 & 124.72 & 20 \\
+FEDAVG & mean & Y & 0.5385 & 0.6667 & 76.83 & 20 \\
 \bottomrule
 \end{tabular}
 \end{table}
