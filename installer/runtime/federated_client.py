@@ -167,19 +167,14 @@ def main():
         # ── Dispatch mode ─────────────────────────────────────────────────────
         if mode in ("run-once", "run_once"):
             from runtime.capture import get_or_capture_session
-            # Check if there are existing files in the input dir
-            input_dir = Path.home() / ".federated" / "data" / "input"
-            has_existing = any(input_dir.glob("session_*/*.mp4")) if input_dir.exists() else False
-            if not has_existing:
-                log.info("No existing session data — capturing 60s for run-once")
-                session_dir = get_or_capture_session(duration_s=60)
-            else:
-                session_dir = None  # will use existing data
+            # Always get the session directory (reuse existing or capture new)
+            # get_or_capture_session() internally handles reusing sessions <24h old
+            session_dir = get_or_capture_session(duration_s=60)
             metrics.record_attempt()
             t0 = time.time()
             try:
                 run_pipeline(stub, device_id, master_secret,
-                    session_dir=session_dir, pipeline_mode="session")
+                            session_dir=session_dir, pipeline_mode="session")
                 metrics.record_success(time.time() - t0)
                 health.healthy(last_run="success")
                 log.info("Run-once pipeline complete ✓")
